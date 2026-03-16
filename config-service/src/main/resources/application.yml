@@ -1,0 +1,28 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: config-service
+  datasource:
+    url: jdbc:postgresql://8.137.116.121:8432/business_db?ssl=true&sslmode=verify-full&sslrootcert=D:/java_project/springcloud-demo/server.crt
+    username: business
+    password: Business@123
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+# Jasypt 加密配置
+jasypt:
+  encryptor:
+    password: ${JASYPT_PASSWORD:ConfigSecretKey2024}
+    algorithm: PBEWithMD5AndDES
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://admin:Eureka@2024!Secure@8.137.116.121:9000/eureka/
+  instance:
+    prefer-ip-address: true
