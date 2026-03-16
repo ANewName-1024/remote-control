@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  eureka-server:
+    build:
+      context: ./eureka-server
+      dockerfile: Dockerfile
+    container_name: eureka-server
+    ports:
+      - "9000:9000"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+    networks:
+      - springcloud
+
+  config-service:
+    build:
+      context: ./config-service
+      dockerfile: Dockerfile
+    container_name: config-service
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://admin:Eureka@2024!Secure@eureka-server:9000/eureka/
+      - JASYPT_PASSWORD=ConfigSecretKey2024
+    depends_on:
+      - eureka-server
+    networks:
+      - springcloud
+
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    container_name: user-service
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://admin:Eureka@2024!Secure@eureka-server:9000/eureka/
+    depends_on:
+      - eureka-server
+    networks:
+      - springcloud
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://admin:Eureka@2024!Secure@eureka-server:9000/eureka/
+    depends_on:
+      - eureka-server
+      - user-service
+    networks:
+      - springcloud
+
+networks:
+  springcloud:
+    driver: bridge

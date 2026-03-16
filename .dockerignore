@@ -1,0 +1,13 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!.mvn/wrapper/MavenWrapperDownloader.java
+.mvn/
+.mvnjunk.log
+*.log
+*.class
+*.jar
+!src/**/target/
+.idea/
+*.iml
+.vscode/
+.DS_Store

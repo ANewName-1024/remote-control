@@ -1,0 +1,27 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: config-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:business_db}?ssl=true&sslmode=verify-full&sslrootcert=/app/server.crt
+    username: ${DB_USERNAME:business}
+    password: ${DB_PASSWORD:Business@123}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+jasypt:
+  encryptor:
+    password: ${JASYPT_PASSWORD:ConfigSecretKey2024}
+    algorithm: PBEWithMD5AndDES
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://admin:Eureka@2024!Secure@localhost:9000/eureka/}
+  instance:
+    prefer-ip-address: true
