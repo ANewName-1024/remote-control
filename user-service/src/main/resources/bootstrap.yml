@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: user-service
+  cloud:
+    config:
+      # 配置中心地址
+      uri: http://localhost:8082
+      profile: ${SPRING_PROFILES_ACTIVE:dev}
+      label: master
+      # 找不到配置中心时失败 (可选: optional)
+      fail-fast: false
+      retry:
+        max-attempts: 3
+        initial-interval: 1000
+        multiplier: 1.5

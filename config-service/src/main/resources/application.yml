@@ -5,25 +5,39 @@ spring:
   application:
     name: config-service
   
-  # 数据源配置 - 优先 PostgreSQL，降级使用 H2
+  # 禁用默认的 composite 配置
+  profiles:
+    active: native
+  
+  # Spring Cloud Config Server 配置 - 使用本地文件系统
+  cloud:
+    config:
+      server:
+        # 使用本地文件系统（不需要 Git）
+        native:
+          search-locations: file:///${CONFIG_REPO_PATH:D:/Cache/config-repo}
+        # 禁用 git
+        git:
+          enabled: false
+        # 启用健康检查
+        health:
+          repositories:
+            - name: user-service
+              label: master
+            - name: gateway
+              label: master
+            - name: ops-service
+              label: master
+  
+  # 数据源配置 - 自身配置（不通过配置中心）
   datasource:
-    # PostgreSQL 配置（优先）- 使用现有的 business_db
     url: jdbc:postgresql://${DB_HOST:8.137.116.121}:${DB_PORT:8432}/${DB_NAME:business_db}?ssl=false
     username: ${DB_USERNAME:business}
     password: ${DB_PASSWORD:NewPass2024}
     driver-class-name: org.postgresql.Driver
     hikari:
-      maximum-pool-size: 10
-      minimum-idle: 2
-      connection-timeout: 30000
-      idle-timeout: 600000
-      max-lifetime: 1800000
-  
-  # H2 配置（降级备用）
-  h2:
-    console:
-      enabled: ${H2_CONSOLE_ENABLED:false}
-      path: /h2-console
+      maximum-pool-size: 5
+      minimum-idle: 1
   
   jpa:
     hibernate:
@@ -32,18 +46,6 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
-        format_sql: true
-    database-platform: org.hibernate.dialect.PostgreSQLDialect
-
-# 如果需要切换到 H2 内存数据库，取消注释以下配置：
-# spring:
-#   datasource:
-#     url: jdbc:h2:mem:configdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
-#     driver-class-name: org.h2.Driver
-#     username: sa
-#     password:
-#   jpa:
-#     database-platform: org.hibernate.dialect.H2Dialect
 
 # JWT 配置
 config:
@@ -51,8 +53,18 @@ config:
     secret: ${CONFIG_JWT_SECRET:ConfigServiceJWTSecretKey2024ChangeInProduction}
     expiration: ${CONFIG_JWT_EXPIRATION:86400000}
 
+# Actuator 配置
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh
+  endpoint:
+    health:
+      show-details: always
+
 # 日志配置
 logging:
   level:
     com.example.config: INFO
-    org.springframework.web: INFO
+    org.springframework.cloud.config: DEBUG

@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: gateway
+  cloud:
+    config:
+      uri: http://localhost:8082
+      profile: ${SPRING_PROFILES_ACTIVE:dev}
+      label: master
+      fail-fast: false
