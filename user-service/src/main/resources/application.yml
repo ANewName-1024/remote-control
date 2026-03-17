@@ -30,6 +30,13 @@ jwt:
   expiration: ${JWT_EXPIRATION:1800000}      # Access Token 30 分钟
   refresh-expiration: ${JWT_REFRESH_EXPIRATION:604800000}  # Refresh Token 7 天
 
+# OIDC 配置
+oidc:
+  issuer: ${OIDC_ISSUER:http://localhost:8081}
+  access-token-expiration: 1800000
+  id-token-expiration: 3600000
+  authorization-code-expiration: 600000
+
 # 注册配置
 auth:
   register:
