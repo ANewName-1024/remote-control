@@ -4,104 +4,31 @@ server:
 spring:
   application:
     name: config-service
+  
+  # 使用 H2 内存数据库
   datasource:
-    url: jdbc:postgresql://8.137.116.121:8432/business_db?ssl=false
-    username: business
-    password: NewPass2024
-    driver-class-name: org.postgresql.Driver
+    url: jdbc:h2:mem:testdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: 
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: create-drop
     show-sql: false
-  cloud:
-    config:
-      server:
-        # 使用 Git 仓库存储配置
-        git:
-          uri: https://github.com/ANewName-1024/spring-cloud-config
-          default-label: master
-          search-paths: config
-          # 私有仓库需要配置认证
-          # username: your-github-username
-          # password: your-github-token
-        # 使用本地文件系统（备用）
-        native:
-          search-locations: classpath:/config,file:./config
-    discovery:
-      enabled: false
-  security:
-    user:
-      name: admin
-      password: admin
-  actuator:
-    endpoints:
-      web:
-        exposure:
-          include: "*"
-    endpoint:
-      health:
-        show-details: always
-
-# 加密配置
-encryption:
-  algorithm: AES
-  default-algorithm: AES
-  root-key-type: SOFTWARE
-  working-key-rotation-days: 90
-
-# OpenClaw 配置
-openclaw:
-  config:
-    default-type: PARAMETER
+    database-platform: org.hibernate.dialect.H2Dialect
 
 # JWT 配置
 config:
   jwt:
-    secret: ConfigServiceJWTSecret2024
+    secret: testSecretKeyForJWTTokenGenerationMustBeLongEnough12345
     expiration: 86400000
 
-# Sleuth 分布式追踪配置
-spring.sleuth.sampler.probability=1.0
-spring.zipkin.base-url=${ZIPKIN_SERVER:http://localhost:9411}
-
-# 定时任务配置
-scheduler:
-  enabled: true  # 全局开关
-  
-  tasks:
-    # 配置刷新任务
-    config-refresh:
-      enabled: true
-      rate: 300000  # 5 分钟
-      description: 定期刷新配置缓存
-    
-    # 密钥轮换任务
-    key-rotation:
-      enabled: true
-      cron: "0 0 2 * * ?"  # 每天凌晨 2 点
-      description: 定期轮换加密密钥
-    
-    # 清理任务
-    cleanup:
-      enabled: true
-      cron: "0 0 4 * *"  # 每天凌晨 4 点
-      description: 清理过期数据
-    
-    # 健康检查任务
-    health-check:
-      enabled: true
-      rate: 300000  # 5 分钟
-      description: 系统健康检查
-
-# XXL-Job 配置
-xxl:
-  job:
-    enabled: false  # 是否启用 XXL-Job (需要调度中心)
-    admin:
-      addresses: http://127.0.0.1:8080/xxl-job-admin
-    access-token: default_token
-    executor:
-      appname: config-service
-      port: 9999
-      logpath: ./logs/xxl-job
-      logretentiondays: 30
+# 日志配置
+logging:
+  level:
+    com.example.config: DEBUG

@@ -1,54 +1,45 @@
 server:
-  port: ${SERVER_PORT:8081}
-  ssl:
-    enabled: ${SSL_ENABLED:false}
-    key-store: ${SSL_KEYSTORE:classpath:cert/keystore.p12}
-    key-store-password: ${SSL_KEYSTORE_PASSWORD:changeit}
-    key-store-type: ${SSL_KEYSTORE_TYPE:PKCS12}
-    key-alias: ${SSL_KEY_ALIAS:server}
+  port: 8081
 
 spring:
   application:
     name: user-service
   datasource:
-    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:8432}/${DB_NAME:business_db}?ssl=true&sslmode=verify-full&sslrootcert=${SSL_CERT_PATH}
-    username: ${DB_USERNAME:business}
-    password: ${DB_PASSWORD}
+    url: jdbc:postgresql://8.137.116.121:8432/business_db
+    username: business
+    password: NewPass2024
     driver-class-name: org.postgresql.Driver
     hikari:
-      ssl: true
-      sslrootcert: ${SSL_CERT_PATH}
+      maximum-pool-size: 10
+      minimum-idle: 5
   jpa:
     hibernate:
       ddl-auto: update
     show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
 
 eureka:
   client:
     service-url:
-      defaultZone: http://${EUREKA_USER:admin}:${EUREKA_PASSWORD}@${EUREKA_HOST}:${EUREKA_PORT:9000}/eureka/
+      defaultZone: http://admin:EurekaNew2024@localhost:9000/eureka/
   instance:
     prefer-ip-address: true
     instance-id: ${spring.application.name}:${server.port}
 
-# Sleuth 分布式追踪配置
-spring.sleuth.sampler.probability=1.0
-spring.zipkin.base-url=${ZIPKIN_SERVER:http://localhost:9411}
-
 jwt:
-  secret: ${JWT_SECRET}
-  expiration: ${JWT_EXPIRATION:1800000}      # Access Token 30 分钟
-  refresh-expiration: ${JWT_REFRESH_EXPIRATION:604800000}  # Refresh Token 7 天
+  secret: mySecretKeyForJWTTokenGenerationMustBeLongEnough12345
+  expiration: 1800000
+  refresh-expiration: 604800000
 
-# OIDC 配置
 oidc:
-  issuer: ${OIDC_ISSUER:http://localhost:8081}
+  issuer: http://localhost:8081
   access-token-expiration: 1800000
   id-token-expiration: 3600000
   authorization-code-expiration: 600000
 
-# 注册配置
 auth:
   register:
-    invite-code-required: ${INVITE_CODE_REQUIRED:false}
-    invite-codes: ${INVITE_CODES:}
+    invite-code-required: false
+    invite-codes: ""

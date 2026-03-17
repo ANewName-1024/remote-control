@@ -6,7 +6,6 @@ server:
     key-store-password: ${SSL_KEYSTORE_PASSWORD:changeit}
     key-store-type: ${SSL_KEYSTORE_TYPE:PKCS12}
     key-alias: ${SSL_KEY_ALIAS:server}
-    # HTTP to HTTPS redirect
     http-to-https-redirect: ${HTTP_TO_HTTPS_REDIRECT:false}
 
 spring:
@@ -15,26 +14,20 @@ spring:
   cloud:
     gateway:
       routes:
-        # 用户服务 + OIDC 授权服务器
         - id: user-service
           uri: lb://user-service
           predicates:
             - Path=/user/**,/oauth/**,/oidc/**
           filters:
             - StripPrefix=0
-        
-        # 配置服务
         - id: config-service
           uri: lb://config-service
           predicates:
             - Path=/config/**,/openclaw/**
           filters:
             - StripPrefix=0
-          
-      # 全局过滤器
       default-filters:
         - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
-      # CORS 配置
       globalcors:
         cors-configurations:
           '[/**]':
@@ -47,38 +40,19 @@ spring:
 eureka:
   client:
     service-url:
-      defaultZone: http://${EUREKA_USER:admin}:${EUREKA_PASSWORD}@${EUREKA_HOST:8.137.116.121}:${EUREKA_PORT:9000}/eureka/
+      defaultZone: http://${EUREKA_USER:admin}:${EUREKA_PASSWORD:EurekaNew2024}@${EUREKA_HOST:8.137.116.121}:${EUREKA_PORT:9000}/eureka/
   instance:
     prefer-ip-address: true
     secure-port-enabled: ${SSL_ENABLED:false}
     secure-port: ${SERVER_PORT:8080}
 
-# Sleuth 分布式追踪配置
-spring:
-  sleuth:
-    sampler:
-      probability: 1.0
-    trace:
-      enabled: true
-  zipkin:
-    base-url: ${ZIPKIN_SERVER:http://localhost:9411}
-    sender:
-      type: web
-  rabbitmq:
-    host: ${RABBITMQ_HOST:localhost}
-    port: ${RABBITMQ_PORT:5672}
-
-# OIDC 配置
 oidc:
   issuer: ${OIDC_ISSUER:http://localhost:8081}
   jwks-uri: ${OIDC_ISSUER:http://localhost:8081}/oauth/jwks
-  # 如果启用 HTTPS
   issuer-uri: ${OIDC_ISSUER:http://localhost:8081}
 
-# JWT 配置
 jwt:
-  secret: ${JWT_SECRET:}
-  # 豁免路径 - 无需 Token 验证的接口
+  secret: ${JWT_SECRET:mySecretKeyForJWTTokenGenerationMustBeLongEnough12345}
   exclude-paths: >-
     /user/auth/login,
     /user/auth/register,
@@ -91,7 +65,6 @@ jwt:
     /actuator/**,
     /health
 
-# 证书配置
 cert:
   rotation:
     enabled: ${CERT_ROTATION_ENABLED:true}

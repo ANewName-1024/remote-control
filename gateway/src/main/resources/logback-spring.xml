@@ -1,27 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <!-- 引入公共日志配置 -->
-    <include resource="common-logback.xml"/>
-    
-    <!-- 应用名称 -->
     <property name="APP_NAME" value="gateway"/>
     
-    <!-- Gateway 特定配置 -->
-    <!--
-    日志记录要点：
-    1. 请求路由日志
-    2. 认证/鉴权日志
-    3. 限流日志
-    4. 错误日志
-    -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
     
-    <!-- 路由日志 -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/${APP_NAME}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>logs/${APP_NAME}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+    
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+    
     <logger name="org.springframework.cloud.gateway" level="INFO"/>
     <logger name="org.springframework.cloud.gateway.handler" level="DEBUG"/>
-    
-    <!-- 认证日志 -->
     <logger name="com.example.gateway.filter" level="INFO"/>
-    
-    <!-- 引入默认配置 -->
-    <include resource="common-logback.xml"/>
 </configuration>

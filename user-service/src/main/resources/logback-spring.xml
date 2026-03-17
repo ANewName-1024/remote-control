@@ -1,32 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <!-- 引入公共日志配置 -->
-    <include resource="common-logback.xml"/>
-    
-    <!-- 应用名称 -->
     <property name="APP_NAME" value="user-service"/>
     
-    <!-- 用户服务特定配置 -->
-    <!-- 
-    日志记录要点：
-    1. 登录/登出日志
-    2. 注册/注销日志  
-    3. 权限变更日志
-    4. 敏感操作日志 (如重置密码)
-    -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
     
-    <!-- 业务日志 Logger -->
-    <logger name="com.example.user.service.AuthService" level="INFO"/>
-    <logger name="com.example.user.service.RoleService" level="INFO"/>
-    <logger name="com.example.user.security" level="DEBUG"/>
-    
-    <!-- 敏感操作日志 (单独记录) -->
-    <appender name="AUDIT_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>logs/${APP_NAME}-audit.log</file>
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/${APP_NAME}.log</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>logs/${APP_NAME}-audit.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <fileNamePattern>logs/${APP_NAME}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
             <maxFileSize>50MB</maxFileSize>
-            <maxHistory>90</maxHistory>
+            <maxHistory>30</maxHistory>
         </rollingPolicy>
         <encoder>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n</pattern>
@@ -34,17 +22,10 @@
         </encoder>
     </appender>
     
-    <!-- 审计日志 Async -->
-    <appender name="ASYNC_AUDIT" class="ch.qos.logback.classic.AsyncAppender">
-        <appender-ref ref="AUDIT_FILE"/>
-        <queueSize>256</queueSize>
-    </appender>
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
     
-    <!-- 审计日志 Logger -->
-    <logger name="AUDIT" level="INFO" additivity="false">
-        <appender-ref ref="ASYNC_AUDIT"/>
-    </logger>
-    
-    <!-- 引入默认配置 -->
-    <include resource="common-logback.xml"/>
+    <logger name="com.example.user" level="DEBUG"/>
 </configuration>

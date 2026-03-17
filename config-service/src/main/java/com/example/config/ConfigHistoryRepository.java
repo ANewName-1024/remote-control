@@ -17,14 +17,14 @@ public interface ConfigHistoryRepository extends JpaRepository<ConfigHistory, Lo
     
     // ========== 定时任务需要的方法 ==========
     
-    int deleteByCreateTimeBefore(LocalDateTime dateTime);
+    int deleteByOperationTimeBefore(LocalDateTime dateTime);
     
-    @Query("SELECT COUNT(h) FROM ConfigHistory h WHERE h.createTime < :dateTime")
-    int countByCreateTimeBefore(LocalDateTime dateTime);
+    @Query("SELECT COUNT(h) FROM ConfigHistory h WHERE h.operationTime < :dateTime")
+    int countByOperationTimeBefore(LocalDateTime dateTime);
     
-    List<ConfigHistory> findByCreateTimeBefore(LocalDateTime dateTime);
+    List<ConfigHistory> findByOperationTimeBefore(LocalDateTime dateTime);
     
     @Modifying
-    @Query("DELETE FROM ConfigHistory WHERE isDeleted = 1")
-    int deleteInvalidConfigs();
+    @Query("DELETE FROM ConfigHistory h WHERE h.id IN (SELECT ch.id FROM ConfigHistory ch WHERE ch.operationTime < :dateTime)")
+    int deleteOldRecords(LocalDateTime dateTime);
 }
