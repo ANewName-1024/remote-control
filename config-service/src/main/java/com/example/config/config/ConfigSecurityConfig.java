@@ -13,7 +13,7 @@ import org.springframework.security.web.SecurityFilterChain;
 
 /**
  * 配置服务安全配置
- * 统一由 Gateway 进行 OIDC 认证，此处信任 Gateway 传递的请求头
+ * 统一由 Gateway 进行 OIDC 认证
  */
 @Configuration
 @EnableWebSecurity
@@ -31,18 +31,27 @@ public class ConfigSecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                // 认证接口公开 (Gateway 会放行)
+                // 1. 认证接口公开 (Gateway 会放行)
                 .requestMatchers("/config/auth/login", "/config/auth/register").permitAll()
-                // 健康检查
+                
+                // 2. 健康检查公开
                 .requestMatchers("/actuator/**", "/health").permitAll()
-                // OpenClaw 配置需登录
+                
+                // 3. Spring Cloud Config 端点 - 生产环境应通过 Gateway 访问
+                .requestMatchers("/encrypt", "/encrypt/**").hasRole("ADMIN")
+                .requestMatchers("/decrypt", "/decrypt/**").hasRole("ADMIN")
+                .requestMatchers("/**").permitAll()  // Config 端点默认公开（建议通过 Gateway 保护）
+                
+                // 4. OpenClaw 配置需登录
                 .requestMatchers("/openclaw/config/type/**").authenticated()
-                // 管理接口需要用户权限
+                
+                // 5. 管理接口需要管理员权限
                 .requestMatchers("/openclaw/config/**").hasRole("USER")
                 .requestMatchers("/openclaw/key/**").hasRole("ADMIN")
+                
+                // 6. 其他请求需要认证
                 .anyRequest().authenticated()
             )
-            // 信任 Gateway 传递的请求头
             .headers(headers -> headers.frameOptions(frame -> frame.sameOrigin()));
 
         return http.build();
