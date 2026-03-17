@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
+import java.util.regex.Pattern;
 
 /**
  * 认证控制器
@@ -19,20 +20,31 @@ public class AuthController {
     private static final org.springframework.security.crypto.password.PasswordEncoder passwordEncoder = 
             new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder();
     
+    // 密码强度正则：至少8位，包含数字和字母
+    private static final Pattern PASSWORD_PATTERN = Pattern.compile("^(?=.*[A-Za-z])(?=.*\\d)[A-Za-z\\d@$!%*#?&]{8,}$");
+    
+    /**
+     * 验证密码强度
+     */
+    private boolean isPasswordStrong(String password) {
+        return password != null && PASSWORD_PATTERN.matcher(password).matches();
+    }
+    
     /**
      * 默认用户 (生产环境应从数据库读取)
+     * 密码要求：至少8位，包含数字和字母
      */
     private static final Map<String, UserCredential> USERS = new HashMap<>();
     
     static {
-        // 默认用户: admin/admin123
-        USERS.put("admin", new UserCredential(1L, "admin", passwordEncoder.encode("admin123"), 
+        // 默认用户: admin (密码: Admin@123456)
+        USERS.put("admin", new UserCredential(1L, "admin", passwordEncoder.encode("Admin@123456"), 
                 List.of("ADMIN"), List.of("ops:view", "ops:manage", "admin:manage")));
-        // 运维人员: ops/ops123
-        USERS.put("ops", new UserCredential(2L, "ops", passwordEncoder.encode("ops123"), 
+        // 运维人员: ops (密码: Ops@123456)
+        USERS.put("ops", new UserCredential(2L, "ops", passwordEncoder.encode("Ops@123456"), 
                 List.of("OPS"), List.of("ops:view", "ops:manage")));
-        // 监控人员: monitor/monitor123
-        USERS.put("monitor", new UserCredential(3L, "monitor", passwordEncoder.encode("monitor123"), 
+        // 监控人员: monitor (密码: Monitor@123456)
+        USERS.put("monitor", new UserCredential(3L, "monitor", passwordEncoder.encode("Monitor@123456"), 
                 List.of("MONITOR"), List.of("ops:view")));
     }
 
@@ -41,6 +53,11 @@ public class AuthController {
      */
     @PostMapping("/login")
     public Map<String, Object> login(@RequestBody LoginRequest request) {
+        // 验证密码强度
+        if (!isPasswordStrong(request.getPassword())) {
+            throw new RuntimeException("密码强度不足，需至少8位，包含数字和字母");
+        }
+        
         UserCredential user = USERS.get(request.getUsername());
         
         if (user == null || !passwordEncoder.matches(request.getPassword(), user.getPassword())) {
