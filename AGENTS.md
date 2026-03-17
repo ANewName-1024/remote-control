@@ -236,3 +236,36 @@ The goal: Be helpful without being annoying. Check in a few times a day, do usef
 ## Make It Yours
 
 This is a starting point. Add your own conventions, style, and rules as you figure out what works.
+
+## Git 提交规范
+
+### 提交前必检
+
+**每次提交代码前必须检查：**
+
+1. **敏感信息** - 运行 `git diff --cached` 检查是否包含：
+   - 密码/secret/token/key
+   - 证书文件 (.crt, .pem, .key)
+   - 配置文件 (.env)
+
+2. **.gitignore** - 确保以下文件已忽略：
+   ```
+   *.env
+   *.crt
+   *.pem
+   *.key
+   .env.local
+   ```
+
+3. **提交信息规范**：
+   - `feat:` 新功能
+   - `fix:` 修复 bug
+   - `docs:` 文档更新
+   - `refactor:` 重构
+   - `security:` 安全修复
+
+### 环境变量最佳实践
+
+- 创建 `.env.example` 模板文件
+- 实际配置放入 `.env` 并加入 `.gitignore`
+- 代码中使用 `${VAR_NAME}` 占位符
