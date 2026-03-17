@@ -1,5 +1,13 @@
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
+  ssl:
+    enabled: ${SSL_ENABLED:false}
+    key-store: ${SSL_KEYSTORE:classpath:cert/keystore.p12}
+    key-store-password: ${SSL_KEYSTORE_PASSWORD:changeit}
+    key-store-type: ${SSL_KEYSTORE_TYPE:PKCS12}
+    key-alias: ${SSL_KEY_ALIAS:server}
+    # HTTP to HTTPS redirect
+    http-to-https-redirect: ${HTTP_TO_HTTPS_REDIRECT:false}
 
 spring:
   application:
@@ -42,6 +50,8 @@ eureka:
       defaultZone: http://${EUREKA_USER:admin}:${EUREKA_PASSWORD}@${EUREKA_HOST:8.137.116.121}:${EUREKA_PORT:9000}/eureka/
   instance:
     prefer-ip-address: true
+    secure-port-enabled: ${SSL_ENABLED:false}
+    secure-port: ${SERVER_PORT:8080}
 
 # Sleuth 分布式追踪配置
 spring:
@@ -62,6 +72,8 @@ spring:
 oidc:
   issuer: ${OIDC_ISSUER:http://localhost:8081}
   jwks-uri: ${OIDC_ISSUER:http://localhost:8081}/oauth/jwks
+  # 如果启用 HTTPS
+  issuer-uri: ${OIDC_ISSUER:http://localhost:8081}
 
 # JWT 配置
 jwt:
@@ -78,3 +90,9 @@ jwt:
     /oauth/client/register,
     /actuator/**,
     /health
+
+# 证书配置
+cert:
+  rotation:
+    enabled: ${CERT_ROTATION_ENABLED:true}
+    interval-days: ${CERT_ROTATION_INTERVAL:90}
