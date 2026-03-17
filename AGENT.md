@@ -4,6 +4,145 @@
 
 本项目是一个基于 Spring Cloud 的微服务 Demo，专注于用户认证和权限管理。支持 OIDC 协议标准，可作为其他系统的认证授权服务。
 
+## 模块业务划分
+
+### 1. user-service (8081) - 用户服务 / 认证中心
+
+**业务职责：**
+- 用户生命周期管理（创建、查询、删除）
+- 用户认证（用户名密码登录）
+- OIDC/OAuth 2.0 授权服务器
+- RBAC 权限管理
+- 机机账户（AKSK）管理
+
+**核心功能：**
+
+| 功能 | 说明 |
+|------|------|
+| 用户管理 | 用户 CRUD |
+| 用户注册 | 用户名密码注册 |
+| 用户登录 | 返回 JWT Token |
+| OIDC 授权 | Authorization Code + PKCE |
+| OIDC Token | 签发 Access/ID/Refresh Token |
+| 客户端注册 | OAuth 2.0 客户端管理 |
+| 角色管理 | 角色 CRUD |
+| 权限管理 | 权限 CRUD |
+| AKSK 管理 | 机机账户创建/轮转 |
+| Refresh Token | Token 刷新/撤销 |
+
+**实体：**
+- User（用户）
+- Role（角色）
+- Permission（权限）
+- OidcClient（OIDC 客户端）
+- ServiceAccount（机机账户）
+- RefreshToken（刷新令牌）
+
+**端点：**
+```
+/user/auth/*       - 用户认证
+/oauth/*          - OIDC 授权
+/user/admin/*     - 管理接口
+```
+
+---
+
+### 2. gateway (8080) - API 网关
+
+**业务职责：**
+- 统一请求入口
+- OIDC Token 验证
+- 路由转发
+- 请求鉴权
+- CORS 处理
+
+**核心功能：**
+
+| 功能 | 说明 |
+|------|------|
+| 路由转发 | 转发到后端微服务 |
+| Token 验证 | OIDC JWT 验证 |
+| JWKS 集成 | 获取公钥验证签名 |
+| 用户信息传递 | X-User-Id/X-User-Name Header |
+| 统一鉴权 | 一次认证，处处通行 |
+| CORS | 跨域支持 |
+
+**配置：**
+```yaml
+routes:
+  - /user/**, /oauth/** → user-service:8081
+  - /config/**, /openclaw/** → config-service:8082
+```
+
+**豁免路径：**
+```
+/user/auth/login
+/user/auth/register
+/oauth/token
+/oauth/jwks
+/actuator/**
+```
+
+---
+
+### 3. config-service (8082) - 配置服务
+
+**业务职责：**
+- Spring Cloud Config Server
+- OpenClaw 配置存储
+- 密钥管理
+- 国密算法支持
+
+**核心功能：**
+
+| 功能 | 说明 |
+|------|------|
+| 配置中心 | Spring Cloud Config Server |
+| Git 配置 | 存储在 Git 仓库 |
+| 配置加密 | Jasypt 加密 |
+| OpenClaw 配置 | 凭证/密钥存储 |
+| 密钥管理 | 软件根/硬件根密钥 |
+| 国密算法 | SM2/SM3/SM4 |
+
+**实体：**
+- OpenClawConfig（OpenClaw 配置）
+- SysConfig（系统配置）
+
+**端点：**
+```
+/{application}/{profile}  - 获取配置
+/openclaw/config/*       - OpenClaw 配置管理
+```
+
+---
+
+## 技术架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         用户请求                               │
+└────────────────────────────┬────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Gateway (8080)                              │
+│  1. OIDC Token 验证                                         │
+│  2. 路由转发                                                │
+│  3. 用户信息传递                                           │
+└────────────────────────────┬────────────────────────────────┘
+                           │
+           ┌───────────────┴───────────────┐
+           ▼                               ▼
+┌─────────────────────┐        ┌─────────────────────┐
+│  user-service      │        │  config-service     │
+│     (8081)         │        │     (8082)          │
+│                    │        │                     │
+│ OIDC 授权服务器   │        │ Spring Cloud Config │
+│ 用户管理          │        │ OpenClaw 配置       │
+│ RBAC 权限         │        │ 密钥管理            │
+└─────────────────────┘        └─────────────────────┘
+```
+
 ## 技术栈
 
 | 组件 | 版本 | 说明 |
@@ -18,109 +157,6 @@
 | JWT/jjwt | 0.12.3 | Token 签发 |
 | BouncyCastle | 1.70 | 国密算法 |
 
-## 项目结构
-
-```
-springcloud-demo/
-├── user-service/              # 用户服务 + OIDC 授权服务器
-│   ├── src/main/java/.../
-│   │   ├── controller/       # REST API 控制器
-│   │   │   ├── AuthController.java      # 用户认证
-│   │   │   └── oidc/
-│   │   │       └── OidcController.java # OIDC 端点
-│   │   ├── service/         # 业务逻辑
-│   │   │   ├── AuthService.java
-│   │   │   └── oidc/
-│   │   │       ├── OidcTokenService.java      # Token 签发
-│   │   │       └── OidcAuthorizationService.java
-│   │   ├── entity/          # 数据实体
-│   │   ├── repository/     # JPA 仓库
-│   │   ├── security/       # 安全组件
-│   │   └── oidc/          # OIDC 实现
-│   └── src/main/resources/
-│       └── application.yml  # 配置文件
-│
-├── gateway/                  # API 网关
-│   └── src/main/java/.../
-│       └── filter/
-│           └── OidcAuthenticationFilter.java  # OIDC Token 验证
-│
-├── config-service/           # 配置服务
-│   └── src/main/java/.../
-│       ├── security/
-│       │   ├── GmCryptUtil.java       # 国密算法
-│       │   └── KeyManagementService.java
-│       └── service/
-│           └── OpenClawConfigService.java
-│
-├── DESIGN.md                 # 系统设计文档
-├── DEPLOY.md                 # 部署说明
-├── API.md                    # 接口文档
-└── README.md                 # 项目说明
-```
-
-## 核心功能
-
-### 1. OIDC/OAuth 2.0 授权服务
-
-**支持的授权流程：**
-- Authorization Code + PKCE（前端应用）
-- Client Credentials（机机账户）
-- Refresh Token（Token 刷新）
-- Password（遗留系统）
-
-**OIDC 端点：**
-| 端点 | 说明 |
-|------|------|
-| `GET /.well-known/openid-configuration` | OIDC 发现文档 |
-| `GET /oauth/jwks` | JSON Web Key Set |
-| `GET /oauth/authorize` | 授权端点 |
-| `POST /oauth/token` | Token 端点 |
-| `GET /oauth/userinfo` | 用户信息 |
-
-### 2. 用户认证
-
-**认证方式：**
-- 用户名密码登录
-- AKSK 登录（机机账户）
-
-**Token：**
-- Access Token：30 分钟有效期
-- Refresh Token：7 天有效期
-- 支持 Token 刷新和撤销
-
-### 3. RBAC 权限管理
-
-**实体：**
-- User（用户）
-- Role（角色）
-- Permission（权限）
-- OidcClient（OIDC 客户端）
-
-**权限模型：**
-```
-用户 ─── N:M ─── 角色 ─── N:M ─── 权限
-```
-
-### 4. 国密算法支持
-
-- SM2：非对称加密
-- SM3：摘要算法
-- SM4：对称加密
-
-### 5. Gateway 统一鉴权
-
-- OIDC JWT 验证
-- JWKS 公钥获取
-- 用户信息传递
-
-### 6. Spring Cloud Config
-
-- 分布式配置中心
-- 配置加密/解密
-- Git 仓库存储配置
-- 多环境配置支持
-
 ## 配置说明
 
 ### 环境变量
@@ -134,7 +170,6 @@ springcloud-demo/
 | `DB_PASSWORD` | 数据库密码 | - |
 | `EUREKA_HOST` | Eureka 地址 | 8.137.116.121 |
 | `EUREKA_PORT` | Eureka 端口 | 9000 |
-| `EUREKA_USER` | Eureka 用户名 | admin |
 | `EUREKA_PASSWORD` | Eureka 密码 | - |
 | `JWT_SECRET` | JWT 密钥 | - |
 | `OIDC_ISSUER` | OIDC 签发者 | http://localhost:8081 |
@@ -146,8 +181,6 @@ springcloud-demo/
 | Gateway | 8080 |
 | user-service | 8081 |
 | config-service | 8082 |
-| Eureka | 9000 |
-| PostgreSQL | 8432 |
 
 ## 使用示例
 
@@ -156,11 +189,7 @@ springcloud-demo/
 ```bash
 curl -X POST http://localhost:8081/oauth/client/register \
   -H "Content-Type: application/json" \
-  -d '{
-    "client_name": "MyApp",
-    "redirect_uris": "http://localhost:3000/callback",
-    "scope": "openid profile email"
-  }'
+  -d '{"client_name":"MyApp","redirect_uris":"http://localhost:3000/callback","scope":"openid profile email"}'
 ```
 
 ### 2. 获取 Token（客户端凭证模式）
@@ -176,9 +205,14 @@ curl -X POST http://localhost:8081/oauth/token \
 ### 3. 通过 Gateway 访问
 
 ```bash
-# 使用 Token 访问业务接口
 curl http://localhost:8080/user/auth/me \
   -H "Authorization: Bearer <access_token>"
+```
+
+### 4. 获取配置
+
+```bash
+curl http://localhost:8082/user-service/dev
 ```
 
 ## 扩展指南
@@ -197,12 +231,6 @@ curl http://localhost:8080/user/auth/me \
 2. 在 `OidcController` 添加新端点
 3. 更新 OIDC 发现文档
 
-### 添加新的加密算法
-
-1. 在 `GmCryptUtil` 添加算法实现
-2. 在 `KeyManagementService` 集成
-3. 配置为默认算法
-
 ## 安全注意事项
 
 - 敏感信息使用环境变量，不要硬编码
@@ -211,21 +239,6 @@ curl http://localhost:8080/user/auth/me \
 - 启用 HTTPS
 - 配置防火墙规则
 - 定期更新依赖版本
-
-## 常见问题
-
-**Q: 如何获取 OIDC 发现文档？**
-```bash
-curl http://localhost:8081/.well-known/openid-configuration
-```
-
-**Q: 如何注册新客户端？**
-```bash
-curl -X POST http://localhost:8081/oauth/client/register
-```
-
-**Q: Gateway 如何验证 Token？**
-Gateway 从 user-service 的 `/oauth/jwks` 获取公钥，验证 Token 签名。
 
 ## 相关文档
 
