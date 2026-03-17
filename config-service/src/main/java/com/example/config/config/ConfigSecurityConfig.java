@@ -1,7 +1,5 @@
 package com.example.config.config;
 
-import com.example.config.security.ConfigJwtAuthenticationFilter;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -12,18 +10,15 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 /**
  * 配置服务安全配置
+ * Gateway 统一认证后，各服务信任 Gateway 传递的请求头
  */
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity
 public class ConfigSecurityConfig {
-
-    @Autowired
-    private ConfigJwtAuthenticationFilter jwtAuthenticationFilter;
 
     @Bean
     public PasswordEncoder passwordEncoder() {
@@ -36,13 +31,17 @@ public class ConfigSecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/config/auth/**").permitAll()  // 认证接口公开
-                .requestMatchers("/actuator/**").permitAll()    // 健康检查
-                .requestMatchers("/openclaw/config/type/**").authenticated()  // OpenClaw 配置需登录
-                .requestMatchers("/openclaw/config/**").hasRole("USER")  // 需要用户权限
+                // 认证接口公开
+                .requestMatchers("/config/auth/login", "/config/auth/register").permitAll()
+                // 健康检查
+                .requestMatchers("/actuator/**", "/health").permitAll()
+                // OpenClaw 配置需登录
+                .requestMatchers("/openclaw/config/type/**").authenticated()
+                // 管理接口需要用户权限
+                .requestMatchers("/openclaw/config/**").hasRole("USER")
+                .requestMatchers("/openclaw/key/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
-            )
-            .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+            );
 
         return http.build();
     }

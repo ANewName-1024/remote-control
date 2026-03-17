@@ -7,14 +7,41 @@ spring:
   cloud:
     gateway:
       routes:
+        # 用户服务
         - id: user-service
           uri: lb://user-service
           predicates:
             - Path=/user/**
+          filters:
+            - StripPrefix=0
+        
+        # 配置服务
+        - id: config-service
+          uri: lb://config-service
+          predicates:
+            - Path=/config/**
+          filters:
+            - StripPrefix=0
+          
+        # OpenClaw 配置服务
+        - id: openclaw-service
+          uri: lb://config-service
+          predicates:
+            - Path=/openclaw/**
+          filters:
+            - StripPrefix=0
+      # 全局过滤器
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
 
 eureka:
   client:
     service-url:
-      defaultZone: http://admin:Eureka@2024!Secure@8.137.116.121:9000/eureka/
+      defaultZone: http://${EUREKA_USER:admin}:${EUREKA_PASSWORD}@${EUREKA_HOST:8.137.116.121}:${EUREKA_PORT:9000}/eureka/
   instance:
     prefer-ip-address: true
+
+# JWT 配置
+jwt:
+  secret: ${JWT_SECRET:}
+  exclude-paths: /user/auth/login,/user/auth/register,/config/auth/login,/config/auth/register,/actuator/**,/health
