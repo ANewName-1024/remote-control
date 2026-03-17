@@ -1,34 +1,58 @@
 server:
-  port: 8082
+  port: ${SERVER_PORT:8082}
 
 spring:
   application:
     name: config-service
   
-  # 使用 H2 内存数据库
+  # 数据源配置 - 优先 PostgreSQL，降级使用 H2
   datasource:
-    url: jdbc:h2:mem:testdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
-    driver-class-name: org.h2.Driver
-    username: sa
-    password: 
+    # PostgreSQL 配置（优先）- 使用现有的 business_db
+    url: jdbc:postgresql://${DB_HOST:8.137.116.121}:${DB_PORT:8432}/${DB_NAME:business_db}?ssl=false
+    username: ${DB_USERNAME:business}
+    password: ${DB_PASSWORD:NewPass2024}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  
+  # H2 配置（降级备用）
   h2:
     console:
-      enabled: true
+      enabled: ${H2_CONSOLE_ENABLED:false}
       path: /h2-console
   
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: update
     show-sql: false
-    database-platform: org.hibernate.dialect.H2Dialect
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+# 如果需要切换到 H2 内存数据库，取消注释以下配置：
+# spring:
+#   datasource:
+#     url: jdbc:h2:mem:configdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+#     driver-class-name: org.h2.Driver
+#     username: sa
+#     password:
+#   jpa:
+#     database-platform: org.hibernate.dialect.H2Dialect
 
 # JWT 配置
 config:
   jwt:
-    secret: testSecretKeyForJWTTokenGenerationMustBeLongEnough12345
-    expiration: 86400000
+    secret: ${CONFIG_JWT_SECRET:ConfigServiceJWTSecretKey2024ChangeInProduction}
+    expiration: ${CONFIG_JWT_EXPIRATION:86400000}
 
 # 日志配置
 logging:
   level:
-    com.example.config: DEBUG
+    com.example.config: INFO
+    org.springframework.web: INFO
