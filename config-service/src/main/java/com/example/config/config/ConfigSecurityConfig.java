@@ -13,7 +13,7 @@ import org.springframework.security.web.SecurityFilterChain;
 
 /**
  * 配置服务安全配置
- * Gateway 统一认证后，各服务信任 Gateway 传递的请求头
+ * 统一由 Gateway 进行 OIDC 认证，此处信任 Gateway 传递的请求头
  */
 @Configuration
 @EnableWebSecurity
@@ -31,7 +31,7 @@ public class ConfigSecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                // 认证接口公开
+                // 认证接口公开 (Gateway 会放行)
                 .requestMatchers("/config/auth/login", "/config/auth/register").permitAll()
                 // 健康检查
                 .requestMatchers("/actuator/**", "/health").permitAll()
@@ -41,7 +41,9 @@ public class ConfigSecurityConfig {
                 .requestMatchers("/openclaw/config/**").hasRole("USER")
                 .requestMatchers("/openclaw/key/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
-            );
+            )
+            // 信任 Gateway 传递的请求头
+            .headers(headers -> headers.frameOptions(frame -> frame.sameOrigin()));
 
         return http.build();
     }
