@@ -7,11 +7,11 @@ spring:
   cloud:
     gateway:
       routes:
-        # 用户服务
+        # 用户服务 + OIDC 授权服务器
         - id: user-service
           uri: lb://user-service
           predicates:
-            - Path=/user/**
+            - Path=/user/**,/oauth/**,/oidc/**
           filters:
             - StripPrefix=0
         
@@ -19,20 +19,22 @@ spring:
         - id: config-service
           uri: lb://config-service
           predicates:
-            - Path=/config/**
+            - Path=/config/**,/openclaw/**
           filters:
             - StripPrefix=0
           
-        # OpenClaw 配置服务
-        - id: openclaw-service
-          uri: lb://config-service
-          predicates:
-            - Path=/openclaw/**
-          filters:
-            - StripPrefix=0
       # 全局过滤器
       default-filters:
         - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+      # CORS 配置
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowed-origins: "*"
+            allowed-methods: "*"
+            allowed-headers: "*"
+            allow-credentials: false
+            max-age: 3600
 
 eureka:
   client:
@@ -41,7 +43,25 @@ eureka:
   instance:
     prefer-ip-address: true
 
+# OIDC 配置
+oidc:
+  issuer: ${OIDC_ISSUER:http://localhost:8081}
+  jwks-uri: ${OIDC_ISSUER:http://localhost:8081}/oauth/jwks
+
 # JWT 配置
 jwt:
   secret: ${JWT_SECRET:}
-  exclude-paths: /user/auth/login,/user/auth/register,/config/auth/login,/config/auth/register,/actuator/**,/health
+  # 豁免路径
+  exclude-paths: >-
+    /user/auth/login,
+    /user/auth/register,
+    /user/auth/refresh,
+    /oauth/token,
+    /oauth/authorize,
+    /oauth/.well-known/**,
+    /oauth/jwks,
+    /oauth/client/register,
+    /config/auth/login,
+    /config/auth/register,
+    /actuator/**,
+    /health
