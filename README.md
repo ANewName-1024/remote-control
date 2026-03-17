@@ -44,7 +44,7 @@
 | eureka-server | 8761 | 服务注册与发现 |
 | gateway | 8080 | API 网关、认证鉴权 |
 | user-service | 8081 | 用户服务、OIDC 授权 |
-| config-service | 8082 | 配置中心、XXL-JOB 调度 |
+| config-service | 8082 | 配置管理服务 (H2 内存数据库) |
 | ops-service | 8090 | 运维监控、告警管理 |
 | common | - | 公共模块 |
 
@@ -57,11 +57,9 @@
 | 微服务 | Spring Cloud | 2023.0.0 |
 | 网关 | Spring Cloud Gateway | 4.1.0 |
 | 注册中心 | Netflix Eureka | - |
-| 配置中心 | Spring Cloud Config | - |
-| 任务调度 | XXL-JOB | 2.3.1 |
+| 配置管理 | 自定义 REST API + H2 | - |
 | 安全 | Spring Security + JWT/OIDC | 6.2.0 |
-| 数据库 | PostgreSQL | - |
-| 国密 | BouncyCastle | 1.70 |
+| 数据库 | H2 (开发) / PostgreSQL (生产) | - |
 
 ## 核心功能
 
@@ -84,10 +82,9 @@
 - ✅ CORS 配置
 
 ### 配置中心
-- ✅ Spring Cloud Config Server
-- ✅ 配置加密存储 (AES)
-- ✅ 国密算法支持 (SM2/SM3/SM4)
-- ✅ XXL-JOB 分布式任务调度
+- ✅ 配置管理 REST API
+- ✅ H2 内存数据库存储
+- ✅ 配置版本历史记录
 
 ### 运维监控
 - ✅ 统一异常处理
@@ -202,4 +199,4 @@ MIT
 
 ---
 
-最后更新: 2026-03-17
+最后更新: 2026-03-18
