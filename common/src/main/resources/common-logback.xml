@@ -24,17 +24,17 @@
     <property name="LOG_PATH" value="logs"/>
     
     <!-- 日志格式 -->
-    <!-- 控制台: 彩色+简洁 -->
+    <!-- 控制台: 彩色+简洁 (含 Trace ID) -->
     <property name="CONSOLE_PATTERN" 
-              value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr([%thread]){magenta} %clr(%-5level){highlight} %clr(%logger{36}){cyan} - %msg%n"/>
+              value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr([%thread]){magenta} %clr(%-5level){highlight} %clr(%logger{36}){cyan} - %clr([%X{traceId:-}]){yellow} %msg%n"/>
     
-    <!-- 文件: 完整信息 -->
+    <!-- 文件: 完整信息 (含 Trace ID) -->
     <property name="FILE_PATTERN" 
-              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"/>
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - [%X{traceId:-},%X{spanId:-}] %msg%n"/>
     
     <!-- JSON: Logstash 格式 -->
     <property name="JSON_PATTERN" 
-              value="%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ} [%thread] %-5level %logger{36} - %msg%n"/>
+              value="%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ} [%thread] %-5level %logger{36} - [%X{traceId:-}] %msg%n"/>
 
     <!-- ============================================================
          Console Appender (开发环境)

@@ -43,6 +43,21 @@ eureka:
   instance:
     prefer-ip-address: true
 
+# Sleuth 分布式追踪配置
+spring:
+  sleuth:
+    sampler:
+      probability: 1.0
+    trace:
+      enabled: true
+  zipkin:
+    base-url: ${ZIPKIN_SERVER:http://localhost:9411}
+    sender:
+      type: web
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+
 # OIDC 配置
 oidc:
   issuer: ${OIDC_ISSUER:http://localhost:8081}

@@ -25,6 +25,10 @@ eureka:
     prefer-ip-address: true
     instance-id: ${spring.application.name}:${server.port}
 
+# Sleuth 分布式追踪配置
+spring.sleuth.sampler.probability=1.0
+spring.zipkin.base-url=${ZIPKIN_SERVER:http://localhost:9411}
+
 jwt:
   secret: ${JWT_SECRET}
   expiration: ${JWT_EXPIRATION:1800000}      # Access Token 30 分钟
