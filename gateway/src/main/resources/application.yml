@@ -51,7 +51,7 @@ oidc:
 # JWT 配置
 jwt:
   secret: ${JWT_SECRET:}
-  # 豁免路径
+  # 豁免路径 - 无需 Token 验证的接口
   exclude-paths: >-
     /user/auth/login,
     /user/auth/register,
@@ -61,7 +61,5 @@ jwt:
     /oauth/.well-known/**,
     /oauth/jwks,
     /oauth/client/register,
-    /config/auth/login,
-    /config/auth/register,
     /actuator/**,
     /health
