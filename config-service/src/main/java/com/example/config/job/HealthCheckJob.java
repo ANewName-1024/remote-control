@@ -1,11 +1,10 @@
-package com.example.config.scheduler;
+package com.example.config.job;
 
+import com.xxl.job.core.context.XxlJobHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.info.BuildProperties;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.lang.management.ManagementFactory;
@@ -16,21 +15,17 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 系统健康检查定时任务
+ * 健康检查任务
  * 
- * 功能：
- * 1. 检查系统资源使用情况
- * 2. 记录健康日志
- * 3. 告警异常状态
+ * 使用 XXL-JOB 定时执行系统健康检查
  */
 @Component
-@ConditionalOnProperty(name = "scheduler.health-check.enabled", havingValue = "true", matchIfMissing = true)
-public class HealthCheckTask {
+public class HealthCheckJob {
 
-    private static final Logger logger = LoggerFactory.getLogger(HealthCheckTask.class);
+    private static final Logger logger = LoggerFactory.getLogger(HealthCheckJob.class);
 
-    private static final double MEMORY_THRESHOLD = 0.85; // 内存阈值 85%
-    private static final double CPU_THRESHOLD = 0.80; // CPU 阈值 80%
+    private static final double MEMORY_THRESHOLD = 0.85;
+    private static final double CPU_THRESHOLD = 0.80;
 
     @Autowired(required = false)
     private BuildProperties buildProperties;
@@ -40,11 +35,11 @@ public class HealthCheckTask {
 
     /**
      * 健康检查任务
-     * 每 5 分钟执行一次
+     * Cron: 0 0/5 * * ? (每5分钟)
      */
-    @Scheduled(fixedRate = 300000)
+    @XxlJob("healthCheckJobHandler")
     public void healthCheck() {
-        logger.debug("开始系统健康检查...");
+        logger.debug("开始执行健康检查任务...");
         
         try {
             Map<String, Object> health = collectHealthInfo();
@@ -53,6 +48,8 @@ public class HealthCheckTask {
             double memoryUsage = (double) health.get("memoryUsage");
             if (memoryUsage > MEMORY_THRESHOLD) {
                 logger.warn("内存使用率过高: {:.2f}%", memoryUsage * 100);
+                XxlJobHelper.handleFail("内存使用率过高");
+                return;
             }
             
             // 检查线程
@@ -63,28 +60,30 @@ public class HealthCheckTask {
             }
             
             logger.debug("健康检查完成: {}", health);
+            XxlJobHelper.handleSuccess("健康检查完成");
         } catch (Exception e) {
             logger.error("健康检查失败", e);
+            XxlJobHelper.handleFail("健康检查失败: " + e.getMessage());
         }
     }
 
     /**
-     * 应用信息日志
-     * 每小时执行一次
+     * 应用信息记录任务
+     * Cron: 0 0 0/1 * * ? (每小时)
      */
-    @Scheduled(fixedRate = 3600000)
-    public void logApplicationInfo() {
+    @XxlJob("appInfoLogJobHandler")
+    public void appInfoLog() {
         logger.info("========== 应用信息 ==========");
         logger.info("应用名称: {}", buildProperties != null ? buildProperties.getName() : "unknown");
         logger.info("版本: {}", buildProperties != null ? buildProperties.getVersion() : "unknown");
-        logger.info("构建时间: {}", buildProperties != null ? buildProperties.getTime() : "unknown");
-        logger.info("启动时间: {}", LocalDateTime.now());
         
         // 记录系统信息
         Runtime runtime = Runtime.getRuntime();
         logger.info("CPU 核心数: {}", runtime.availableProcessors());
         logger.info("最大内存: {} MB", runtime.maxMemory() / 1024 / 1024);
         logger.info("================================");
+        
+        XxlJobHelper.handleSuccess("应用信息记录完成");
     }
 
     /**

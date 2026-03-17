@@ -88,3 +88,16 @@ scheduler:
       enabled: true
       rate: 300000  # 5 分钟
       description: 系统健康检查
+
+# XXL-Job 配置
+xxl:
+  job:
+    enabled: false  # 是否启用 XXL-Job (需要调度中心)
+    admin:
+      addresses: http://127.0.0.1:8080/xxl-job-admin
+    access-token: default_token
+    executor:
+      appname: config-service
+      port: 9999
+      logpath: ./logs/xxl-job
+      logretentiondays: 30
