@@ -31,3 +31,7 @@ logs/
 *.pem
 *.key
 server.crt
+
+# Environment
+*.env
+.env.local
