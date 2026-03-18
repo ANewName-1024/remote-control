@@ -13,6 +13,18 @@ spring:
       config:
         import-check:
           enabled: false
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:8.137.116.121}:${DB_PORT:8432}/${DB_NAME:business_db}
+    username: ${DB_USERNAME:business}
+    password: ${DB_PASSWORD:NewPass2024}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
 
 # Sleuth 分布式追踪配置
 sleuth:
