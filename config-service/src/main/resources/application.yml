@@ -1,6 +1,8 @@
 spring:
   application:
     name: config-service
+  main:
+    allow-bean-definition-overriding: true
   cloud:
     nacos:
       discovery:

@@ -7,7 +7,7 @@
     <parent>
         <groupId>com.example</groupId>
         <artifactId>springcloud-demo</artifactId>
-        <version>1.0.0</version>
+        <version>2.2.0</version>
     </parent>
 
     <artifactId>gateway</artifactId>
@@ -23,10 +23,10 @@
             <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
         </dependency>
         
-        <!-- Spring Cloud Gateway (WebFlux) -->
+        <!-- Spring Cloud Gateway -->
         <dependency>
             <groupId>org.springframework.cloud</groupId>
-            <artifactId>spring-cloud-starter-gateway-server-webflux</artifactId>
+            <artifactId>spring-cloud-starter-gateway</artifactId>
         </dependency>
         
         <!-- Caffeine Cache -->
