@@ -12,40 +12,40 @@
 │   │   ┌───────────────────────────────────────────────────────────────┐  │   │
 │   │   │  配置中心 (Nacos Config)                                     │  │   │
 │   │   │  ├── user-service-dev.yml                                    │  │   │
-│   │   │  ├── gateway-dev.yml                                        │  │   │
+│   │   │  ├── gateway-dev.yml                                         │  │   │
 │   │   │  ├── ops-service-dev.yml                                    │  │   │
-│   │   │  └── shared-config.yml (共享配置)                           │  │   │
+│   │   │  └── shared-config.yml                                       │  │   │
 │   │   └───────────────────────────────────────────────────────────────┘  │   │
 │   │   ┌───────────────────────────────────────────────────────────────┐  │   │
-│   │   │  服务注册发现 (Nacos Discovery)                              │  │   │
-│   │   │  ├── Gateway                                                 │  │   │
+│   │   │  服务注册发现 (Nacos Discovery) - 替代 Eureka              │  │   │
+│   │   │  ├── Gateway                                                │  │   │
 │   │   │  ├── User-Service                                           │  │   │
 │   │   │  ├── Config-Service                                         │  │   │
-│   │   │  └── Ops-Service                                            │  │   │
+│   │   │  └── Ops-Service                                             │  │   │
 │   │   └───────────────────────────────────────────────────────────────┘  │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                      │                                        │
 │                                      │ 配置获取 / 服务注册                     │
 │                                      ▼                                        │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                           API Gateway (8080)                         │   │
-│   │                    路由 + 鉴权 + 限流 + 日志                        │   │
+│   │                          API Gateway (8080)                         │   │
+│   │                   路由 + 鉴权 + 限流 + 日志                         │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │            │                        │                        │                │
 │            │                        │                        │                │
 │   ┌────────┴────────┐     ┌────────┴────────┐     ┌───────┴────────┐    │
-│   │  User Service  │     │ Config Service  │     │  Ops Service   │    │
-│   │    (8081)     │     │    (8082)      │     │    (8083)     │    │
-│   └────────────────┘     └─────────────────┘     └────────────────┘    │
+│   │  User Service    │     │ Config Service  │     │  Ops Service   │    │
+│   │    (8081)       │     │    (8082)      │     │    (8083)     │    │
+│   └──────────────────┘     └──────────────────┘     └────────────────┘    │
 │            │                        │                        │                │
 │            └────────────────────────┼────────────────────────┘                │
 │                                     │                                         │
 │                                     ▼                                         │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                    PostgreSQL (8432)                               │   │
+│   │                      PostgreSQL (8432)                              │   │
 │   │   ┌───────────────┐  ┌───────────────┐  ┌───────────────────────┐  │   │
-│   │   │ business_db   │  │ nacos_config │  │   现有表             │  │   │
-│   │   │ (业务数据)    │  │ (Nacos元数据)│  │ sys_config等        │  │   │
+│   │   │  business_db  │  │nacos_config  │  │    现有表             │  │   │
+│   │   │  (业务数据)   │  │(Nacos元数据) │  │  sys_config等        │  │   │
 │   │   └───────────────┘  └───────────────┘  └───────────────────────┘  │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
@@ -58,13 +58,15 @@
 
 | 组件 | 版本 | 说明 |
 |------|------|------|
-| Spring Boot | 3.5.0 | Java 框架 |
-| Spring Cloud | 2025.0.0 | 微服务框架 |
-| Nacos | 2.3.2 | 配置中心 + 服务发现 |
-| PostgreSQL | 11.15 | 数据库 |
-| Gateway | - | API 网关 |
-| JWT | 0.12.3 | 身份认证 |
-| 国密算法 | - | SM2/SM3/SM4 |
+| **Spring Boot** | 3.5.0 | Java 框架 |
+| **Spring Cloud** | 2025.0.0 | 微服务框架 |
+| **Nacos** | 2.3.2 | 配置中心 + 服务注册发现 (替代 Eureka) |
+| **PostgreSQL** | 11.15 | 数据库 |
+| **Gateway** | - | API 网关 |
+| **JWT** | 0.12.3 | 身份认证 |
+| **国密算法** | - | SM2/SM3/SM4 |
+
+> **重要变更**: 移除 Eureka，使用 Nacos 同时提供配置中心和服务注册发现功能。
 
 ---
 
@@ -78,7 +80,7 @@
 | **User Service** | 8081 | 用户服务 | 用户管理、RBAC、OIDC |
 | **Config Service** | 8082 | 配置服务 | 现有配置管理 API、国密 |
 | **Ops Service** | 8083 | 运维服务 | 告警、监控 |
-| **Nacos** | 8848 | 配置中心 | 配置管理、服务注册 |
+| **Nacos** | 8848 | 配置中心+注册中心 | 配置管理、服务注册 |
 | **PostgreSQL** | 8432 | 数据库 | 业务数据 + Nacos 元数据 |
 
 ### 3.2 服务依赖
@@ -88,7 +90,7 @@ Gateway
   │
   ├── 依赖 Nacos (服务发现)
   │
-  └── 路由到
+  └── 路由到 (通过 Nacos Discovery)
         ├── User Service
         ├── Config Service
         └── Ops Service
@@ -130,8 +132,7 @@ Namespace: public (默认)
   │   └── ops-service-dev.yml
   │
   └── Group: SHARED_GROUP
-      ├── shared-config.yml    # 共享配置 (数据库、Eureka)
-      └── jwt-config.yml       # JWT 配置
+      └── shared-config.yml    # 共享配置
 ```
 
 ### 4.2 配置内容
@@ -149,14 +150,10 @@ spring:
       maximum-pool-size: 10
       minimum-idle: 2
 
-eureka:
-  client:
-    service-url:
-      defaultZone: http://${EUREKA_USER:admin}:${EUREKA_PASSWORD:EurekaNew2024}@${EUREKA_HOST:8.137.116.121}:${EUREKA_PORT:9000}/eureka/
-    register-with-eureka: true
-    fetch-registry: true
-  instance:
-    prefer-ip-address: true
+# 使用 Nacos Discovery，无需 Eureka 配置
+spring.cloud.nacos.discovery:
+  enabled: true
+  register-enabled: true
 ```
 
 #### user-service-dev.yml
@@ -168,6 +165,11 @@ server:
 spring:
   application:
     name: user-service
+  cloud:
+    nacos:
+      discovery:
+        enabled: true
+        register-enabled: true
 
 jwt:
   secret: ${JWT_SECRET:UserServiceJWTSecretKey2024}
@@ -198,11 +200,14 @@ spring:
           - data-id: shared-config.yml
             group: SHARED_GROUP
             refresh: true
+      discovery:
+        enabled: true
+        register-enabled: true
 ```
 
 ---
 
-## 5. 服务注册发现
+## 5. 服务注册发现 (替代 Eureka)
 
 ### 5.1 Nacos 服务列表
 
@@ -214,8 +219,8 @@ spring:
 ├─────────────────┼────────────┼────────────────────────────────┤
 │ gateway         │ 8080      │ version: 1.0.0                │
 │ user-service    │ 8081      │ version: 1.0.0                │
-│ config-service  │ 8082      │ version: 1.0.0                │
-│ ops-service     │ 8083      │ version: 1.0.0                │
+│ config-service │ 8082      │ version: 1.0.0                │
+│ ops-service    │ 8083      │ version: 1.0.0                │
 └─────────────────┴────────────┴────────────────────────────────┘
 ```
 
@@ -243,6 +248,18 @@ spring:
             - Path=/config/**
 ```
 
+### 5.3 服务注册示例
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient  // Nacos Discovery 自动注册
+public class UserServiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(UserServiceApplication.class, args);
+    }
+}
+```
+
 ---
 
 ## 6. 现有能力保留
@@ -259,32 +276,87 @@ spring:
 ### 6.2 架构整合
 
 ```
-                    Nacos (配置中心)
+                    Nacos (配置中心 + 服务注册)
                           │
          ┌────────────────┼────────────────┐
          │                │                │
     ┌────┴────┐    ┌────┴────┐    ┌────┴────┐
-    │ Gateway  │    │  User   │    │  Ops    │
+    │ Gateway │    │  User   │    │  Ops    │
     └─────────┘    └─────────┘    └─────────┘
          │                │                │
          └────────────────┼────────────────┘
                           │
                     ┌─────┴─────┐
-                    │ Config    │
-                    │ Service   │
+                    │  Config   │
+                    │  Service  │
                     └───────────┘
                           │
                     ┌─────┴─────┐
                     │ PostgreSQL │
-                    │ (业务+配置)│
+                    │(业务+配置) │
                     └───────────┘
 ```
 
 ---
 
-## 7. 安全设计
+## 7. Eureka 移除说明
 
-### 7.1 认证流程
+### 7.1 架构变更
+
+| 旧架构 | 新架构 |
+|--------|--------|
+| Eureka Server (9000) | 已移除 |
+| Nacos (8848) 仅配置 | Nacos (8848) 配置 + 注册 |
+
+### 7.2 依赖变更
+
+**移除的依赖**:
+```xml
+<!-- 已移除 -->
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+</dependency>
+```
+
+**新增的依赖**:
+```xml
+<!-- Nacos Discovery -->
+<dependency>
+    <groupId>com.alibaba.cloud</groupId>
+    <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+    <version>2023.0.1.2</version>
+</dependency>
+```
+
+### 7.3 配置变更
+
+**旧配置 (Eureka)**:
+```yaml
+eureka:
+  client:
+    service-url:
+      defaultZone: http://admin:EurekaNew2024@8.137.116.121:9000/eureka/
+  instance:
+    prefer-ip-address: true
+```
+
+**新配置 (Nacos)**:
+```yaml
+spring:
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+        namespace: public
+        enabled: true
+```
+
+---
+
+## 8. 安全设计
+
+### 8.1 认证流程
 
 ```
 用户请求
@@ -292,16 +364,17 @@ spring:
     ▼
 ┌─────────────┐
 │  Gateway   │
-│  (JWT验证) │
+│  (JWT验证)  │
 └──────┬──────┘
        │ 验证通过
        ▼
 ┌─────────────┐
 │  业务服务   │
+│(Nacos注册) │
 └─────────────┘
 ```
 
-### 7.2 Nacos 安全
+### 8.2 Nacos 安全
 
 | 安全措施 | 说明 |
 |----------|------|
@@ -312,52 +385,57 @@ spring:
 
 ---
 
-## 8. 部署方案
+## 9. 部署方案
 
-### 8.1 开发环境
+### 9.1 开发环境
 
 ```
 本机运行:
-├── Nacos (8848)        - Docker 或嵌入式
-├── Gateway (8080)       - Maven 启动
-├── User Service (8081)  - Maven 启动
-├── Config Service (8082) - Maven 启动
-└── PostgreSQL (8432)    - 阿里云服务器
+├── Nacos (8848)           - Docker 或嵌入式
+├── Gateway (8080)         - Maven 启动
+├── User Service (8081)    - Maven 启动
+├── Config Service (8082)  - Maven 启动
+└── PostgreSQL (8432)      - 阿里云服务器
 ```
 
-### 8.2 生产环境
+### 9.2 生产环境
 
 ```
 阿里云服务器:
 ├── Nacos Cluster (8848)    - 3 节点
 ├── Gateway Cluster (8080)  - 2 节点
 ├── User Service (8081)     - 2 节点
-├── Config Service (8082)   - 2 节点
+├── Config Service (8082)  - 2 节点
 ├── Ops Service (8083)     - 2 节点
 └── PostgreSQL (8432)      - 主从复制
 ```
 
 ---
 
-## 9. 实施计划
+## 10. 实施计划
 
 ### Phase 1: 基础搭建 (1-2天)
 - [ ] 部署 Nacos Server
 - [ ] 配置 Nacos 数据库 (PostgreSQL)
 - [ ] 创建 Nacos 配置
 
-### Phase 2: 服务集成 (2-3天)
-- [ ] 各服务添加 Nacos 依赖
-- [ ] 修改 bootstrap.yml
+### Phase 2: 移除 Eureka (1-2天)
+- [ ] 移除 eureka-server 模块
+- [ ] 各服务移除 Eureka 依赖
+- [ ] 添加 Nacos Discovery 依赖
+
+### Phase 3: 服务集成 (2-3天)
+- [ ] 各服务配置 Nacos
 - [ ] 测试配置获取
+- [ ] 测试服务注册
 - [ ] 测试动态刷新
 
-### Phase 3: 服务注册 (1-2天)
-- [ ] 各服务添加 Nacos Discovery
-- [ ] Gateway 启用服务发现路由
+### Phase 4: Gateway 改造 (1-2天)
+- [ ] Gateway 使用 Nacos Discovery
+- [ ] 启用服务发现路由
 - [ ] 测试服务调用
 
-### Phase 4: 优化完善 (1-2天)
+### Phase 5: 优化完善 (1-2天)
 - [ ] 配置版本管理
 - [ ] 权限控制
 - [ ] 监控告警
@@ -365,14 +443,13 @@ spring:
 
 ---
 
-## 10. 配置文件汇总
+## 11. 配置文件汇总
 
-### 10.1 Nacos 配置清单
+### 11.1 Nacos 配置清单
 
 | Data ID | 环境 | 说明 |
 |---------|------|------|
-| shared-config.yml | 共享 | 数据库、Eureka 配置 |
-| jwt-config.yml | 共享 | JWT 密钥配置 |
+| shared-config.yml | 共享 | 数据库配置 |
 | gateway-dev.yml | 开发 | Gateway 开发配置 |
 | gateway-prod.yml | 生产 | Gateway 生产配置 |
 | user-service-dev.yml | 开发 | 用户服务开发配置 |
@@ -380,10 +457,10 @@ spring:
 | config-service-dev.yml | 开发 | 配置服务开发配置 |
 | ops-service-dev.yml | 开发 | 运维服务开发配置 |
 
-### 10.2 环境变量
+### 11.2 环境变量
 
 ```bash
-# Nacos
+# Nacos (配置中心 + 注册中心)
 export NACOS_HOST=localhost
 export NACOS_PORT=8848
 export NACOS_USERNAME=nacos
@@ -399,13 +476,28 @@ export DB_PASSWORD=NewPass2024
 
 ---
 
-## 11. 架构优势
+## 12. 架构优势
 
 | 优势 | 说明 |
 |------|------|
-| **集中配置** | 所有配置在 Nacos 管理 |
+| **统一入口** | Nacos 同时提供配置中心和服务注册发现 |
+| **简化部署** | 移除 Eureka Server，减少组件 |
 | **动态刷新** | 配置变更无需重启 |
 | **服务发现** | 自动注册和发现 |
 | **负载均衡** | Gateway 自动负载 |
 | **高可用** | 支持集群部署 |
 | **可视化** | Nacos 控制台管理 |
+
+---
+
+## 13. 对比: Eureka vs Nacos
+
+| 特性 | Eureka (已废弃) | Nacos (新) |
+|------|-----------------|------------|
+| 配置中心 | 需额外组件 | 原生支持 |
+| 服务注册 | ✅ | ✅ |
+| 配置管理 | ❌ | ✅ |
+| GUI 管理 | 无 | 完善 |
+| 多语言支持 | Java | 多语言 SDK |
+| 活跃度 | 维护中 | 阿里开源活跃 |
+| 部署复杂度 | 高 (需部署 Eureka Server) | 低 (单一组件) |
