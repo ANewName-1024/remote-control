@@ -3,18 +3,11 @@ spring:
     name: user-service
   cloud:
     nacos:
-      server-addr: ${NACOS_HOST:localhost}:${NACOS_PORT:8848}
-      username: ${NACOS_USERNAME:nacos}
-      password: ${NACOS_PASSWORD:nacos}
       discovery:
-        namespace: public
-        enabled: true
-        register-enabled: true
+        enabled: ${NACOS_ENABLED:false}
       config:
-        namespace: public
-        enabled: true
-        file-extension: yml
-        refresh-enabled: true
+        import-check:
+          enabled: false
   datasource:
     url: jdbc:postgresql://${DB_HOST:8.137.116.121}:${DB_PORT:8432}/${DB_NAME:business_db}
     username: ${DB_USERNAME:business}
@@ -23,9 +16,6 @@ spring:
     hikari:
       maximum-pool-size: 10
       minimum-idle: 2
-
-# 本地备用配置
-spring.config.import: optional:file:./config
 
 server:
   port: ${SERVER_PORT:8081}

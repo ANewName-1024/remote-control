@@ -6,16 +6,11 @@ spring:
     name: ops-service
   cloud:
     nacos:
-      server-addr: ${NACOS_HOST:localhost}:${NACOS_PORT:8848}
-      username: ${NACOS_USERNAME:nacos}
-      password: ${NACOS_PASSWORD:nacos}
       discovery:
-        namespace: public
-        enabled: true
-        register-enabled: true
-
-# 本地备用配置
-spring.config.import: optional:file:./config
+        enabled: ${NACOS_ENABLED:false}
+      config:
+        import-check:
+          enabled: false
 
 # Sleuth 分布式追踪配置
 sleuth:

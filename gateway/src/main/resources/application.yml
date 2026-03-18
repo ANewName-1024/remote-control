@@ -3,34 +3,23 @@ spring:
     name: gateway
   cloud:
     nacos:
-      server-addr: ${NACOS_HOST:localhost}:${NACOS_PORT:8848}
-      username: ${NACOS_USERNAME:nacos}
-      password: ${NACOS_PASSWORD:nacos}
       discovery:
-        namespace: public
-        enabled: true
-        register-enabled: true
+        enabled: ${NACOS_ENABLED:false}
       config:
-        namespace: public
-        enabled: true
-        file-extension: yml
-        refresh-enabled: true
+        import-check:
+          enabled: false
     gateway:
       server:
         webflux:
           routes:
             - id: user-service
-              uri: lb://user-service
+              uri: http://localhost:8081
               predicates:
                 - Path=/user/**
             - id: config-service
-              uri: lb://config-service
+              uri: http://localhost:8082
               predicates:
                 - Path=/config/**
-          discovery:
-            locator:
-              enabled: true
-              lower-case-service-id: true
 
 server:
   port: ${SERVER_PORT:8080}
@@ -38,9 +27,6 @@ server:
 jwt:
   secret: ${JWT_SECRET:GatewayJWTSecretKey2024ChangeInProduction}
   expiration: 1800000
-
-# 本地备用配置 (Nacos 不可用时)
-spring.config.import: optional:file:./config
 
 logging:
   level:
