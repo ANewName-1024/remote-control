@@ -15,10 +15,6 @@ spring:
         enabled: true
         file-extension: yml
         refresh-enabled: true
-        shared-configs:
-          - data-id: shared-config.yml
-            group: SHARED_GROUP
-            refresh: true
     gateway:
       server:
         webflux:
@@ -35,16 +31,6 @@ spring:
             locator:
               enabled: true
               lower-case-service-id: true
-          globalcors:
-            cors-configurations:
-              '[/**]':
-                allowedOrigins: "*"
-                allowedMethods:
-                  - GET
-                  - POST
-                  - PUT
-                  - DELETE
-                allowedHeaders: "*"
 
 server:
   port: ${SERVER_PORT:8080}
@@ -53,7 +39,9 @@ jwt:
   secret: ${JWT_SECRET:GatewayJWTSecretKey2024ChangeInProduction}
   expiration: 1800000
 
+# 本地备用配置 (Nacos 不可用时)
+spring.config.import: optional:file:./config
+
 logging:
   level:
     org.springframework.cloud.gateway: DEBUG
-    com.alibaba.cloud.nacos: DEBUG
