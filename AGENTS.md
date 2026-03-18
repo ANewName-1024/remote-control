@@ -71,6 +71,23 @@ If inferring a new rule, keep it tentative until human validation.
 - When you make a mistake → document it so future-you doesn't repeat it
 - **Text > Brain** 📝
 
+### 🔄 代码提交规范
+
+**每个关键步骤完成后必须：**
+1. 提交代码到仓库
+2. 更新相关文档
+
+**提交信息规范：**
+- `feat:` 新功能
+- `fix:` 修复 bug
+- `docs:` 文档更新
+- `refactor:` 重构
+- `security:` 安全修复
+
+**提交前检查：**
+- 运行 `git diff --cached` 检查敏感信息
+- 确保 .gitignore 已配置
+
 ## Red Lines
 
 - Don't exfiltrate private data. Ever.
