@@ -9,6 +9,7 @@
 - **监控模块 Phase 1 已完成** (JVM/DB/System 指标采集 + Prometheus)
 - **告警模块 Phase 2 已完成** (AlertRuleEngine + CRUD API)
 - **运维模块 Phase 3 已完成** (任务调度 + 脚本执行 + 任务管理)
+- **自动修复模块 Phase 4 已完成** (AutoHealService + 策略管理)
 
 ### 安全实践
 - 敏感信息使用环境变量
