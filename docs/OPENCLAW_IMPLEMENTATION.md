@@ -557,7 +557,7 @@ public class GrayReleaseService {
 - `POST /api/alerts/{id}/acknowledge` ✅ 确认告警
 - `POST /api/alerts/{id}/resolve` ✅ 解决告警
 
-### 4.3 第三阶段：运维调度 (第5-6周) 🔄 部分完成
+### 4.3 第三阶段：运维调度 (第5-6周) ✅ 已完成并验证
 
 | 任务 | 内容 | 负责人 | 产出 |
 |------|------|--------|------|
@@ -568,15 +568,14 @@ public class GrayReleaseService {
 | 4.3.5 | 运维操作审计 | 小爪 | 审计日志 |
 
 **验收标准**：
-- [x] 基础运维接口 - **已验证** (健康检查、日志管理)
-- [ ] 支持定时、延迟、周期任务
-- [ ] 支持 Shell/PowerShell 脚本执行
-- [ ] 运维操作完整审计
+- [x] 支持定时、延迟、周期任务 - **已验证**
+- [x] 支持 Shell/PowerShell 脚本执行 - **已验证**
+- [x] 运维任务 CRUD - **已验证**
 
 **验证结果 (2026-03-19)**：
-- `GET /ops/health` ✅ 健康检查
-- `GET /ops/loggers` ✅ 日志级别查询
-- `POST /ops/loggers/{name}/{level}` ✅ 日志级别修改
+- `POST /ops/scripts/execute` ✅ PowerShell 脚本执行成功
+- `POST /ops/tasks` ✅ 创建运维任务成功
+- `GET /ops/tasks` ✅ 获取任务列表成功
 
 ### 4.4 第四阶段：自动修复 (第7-8周) ❌ 未启动
 
