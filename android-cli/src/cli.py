@@ -42,7 +42,20 @@ class AndroidCLI:
         return self.adb.screenshot(path)
 
     def click(self, selector: str) -> dict:
-        """点击元素"""
+        """点击元素或坐标"""
+        # 纯数字坐标 "x,y" 格式
+        if "," in selector:
+            parts = selector.split(",")
+            if len(parts) == 2:
+                a, b = parts[0].strip(), parts[1].strip()
+                if (a.replace("-", "").isdigit() and b.replace("-", "").isdigit()):
+                    x, y = int(a), int(b)
+                    self.adb.click(x, y)
+                    print(f"[OK] Clicked at ({x}, {y})")
+                    time.sleep(0.5)
+                    return {"x": x, "y": y}
+
+        # 按元素
         if not self.current_snapshot:
             self.snapshot()
 
@@ -70,8 +83,7 @@ class AndroidCLI:
 
         cx, cy = el.center
         self.adb.click(cx, cy)
-        print(f"✅ Clicked [{el.ref}] {el.text or el.content_desc} at ({cx}, {cy})")
-
+        print(f"[OK] Clicked [{el.ref}] at ({cx}, {cy})")
         time.sleep(0.5)
         return {"ref": el.ref, "x": cx, "y": cy}
 
@@ -95,20 +107,19 @@ class AndroidCLI:
         self.adb.click(cx, cy)
         time.sleep(0.3)
         self.adb.input_text(text)
-        print(f"✅ Typed '{text}' at [{el.ref}]")
-
+        print(f"[OK] Typed '{text}' at [{el.ref}]")
         return {"ref": el.ref, "text": text}
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int = 300):
         """滑动"""
         self.adb.swipe(x1, y1, x2, y2, duration)
-        print(f"✅ Swiped ({x1},{y1}) -> ({x2},{y2})")
+        print(f"[OK] Swiped ({x1},{y1}) -> ({x2},{y2})")
         time.sleep(0.3)
 
     def wait(self, ms: int):
         """等待"""
         time.sleep(ms / 1000)
-        print(f"✅ Waited {ms}ms")
+        print(f"[OK] Waited {ms}ms")
 
     def press(self, key: str) -> dict:
         """按键"""
@@ -118,7 +129,7 @@ class AndroidCLI:
             raise ValueError(f"未知按键: {key}，可用: {list(KEY_MAP.keys())}")
 
         self.adb.press_key(keycode)
-        print(f"✅ Pressed {key}")
+        print(f"[OK] Pressed {key}")
         time.sleep(0.3)
         return {"key": key}
 
@@ -183,7 +194,7 @@ def main():
             sys.exit(1)
 
     except Exception as e:
-        print(f"❌ 错误: {e}")
+        print(f"[ERROR] {e}")
         sys.exit(1)
 
 

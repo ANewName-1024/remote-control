@@ -5,7 +5,12 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
 
-_ref_counter = 0
+_ref_counter = [0]  # mutable int wrapper
+
+
+def _generate_ref() -> str:
+    _ref_counter[0] += 1
+    return f"e{_ref_counter[0]}"
 
 
 @dataclass
@@ -31,15 +36,8 @@ class UIElement:
         return x2 > x1 and y2 > y1
 
 
-def _generate_ref() -> str:
-    global _ref_counter
-    _ref_counter += 1
-    return f"e{_ref_counter}"
-
-
 def parse_elements(xml_path: str) -> list[UIElement]:
-    global _ref_counter
-    _ref_counter = 0
+    _ref_counter[0] = 0
 
     if not xml_path or not __import__("os").path.exists(xml_path):
         return []
@@ -53,27 +51,28 @@ def parse_elements(xml_path: str) -> list[UIElement]:
     elements = []
 
     def parse_node(node: ET.Element):
-        global _ref_counter
+        # 获取节点属性
         text = node.get("text", "") or ""
         content_desc = node.get("content-desc", "") or ""
         resource_id = node.get("resource-id", "") or ""
         class_name = node.get("class", "") or ""
         bounds_str = node.get("bounds", "")
 
+        # 解析 bounds
         bounds = (0, 0, 0, 0)
         if bounds_str:
-            coords = bounds_str.replace("[", "").replace("]", "").split(",")
-            if len(coords) == 4:
-                bounds = tuple(int(c) for c in coords)
+            # Format: [x1,y1][x2,y2]
+            parts = bounds_str.replace("][", ",").replace("[", "").replace("]", "").split(",")
+            if len(parts) == 4:
+                bounds = tuple(int(c) for c in parts)
 
+        # 解析属性
         clickable = node.get("clickable", "false") == "true"
         enabled = node.get("enabled", "true") == "true"
         focusable = node.get("focusable", "false") == "true"
 
-        ref = _generate_ref()
-
         element = UIElement(
-            ref=ref,
+            ref=_generate_ref(),
             text=text,
             content_desc=content_desc,
             resource_id=resource_id,
@@ -84,12 +83,16 @@ def parse_elements(xml_path: str) -> list[UIElement]:
             focusable=focusable,
         )
 
+        elements.append(element)
+
+        # 递归解析子节点
         for child in node:
-            elements.append(element)
             parse_node(child)
 
-    for child in root:
-        parse_node(child)
+    # 从 hierarchy 根开始解析，跳过顶层
+    if len(root) > 0:
+        for child in root:
+            parse_node(child)
 
     return elements
 
@@ -127,11 +130,18 @@ def find_element(
 
 
 def print_elements(elements: list[UIElement], limit: int = 50):
-    for i, e in enumerate(elements[:limit]):
-        clickable_flag = "✓" if e.clickable else " "
+    shown = 0
+    for e in elements:
+        if not e.is_displayed:
+            continue
+        shown += 1
+        if shown > limit:
+            print(f"... 还有 {len(elements) - limit} 个元素")
+            break
+        clickable_flag = "[+]" if e.clickable else "[ ]"
         bounds_str = f"[{e.bounds[0]},{e.bounds[1]}][{e.bounds[2]},{e.bounds[3]}]"
         text_display = (e.text[:20] + "...") if len(e.text) > 20 else e.text
-        print(f"[{e.ref}] {clickable_flag} {bounds_str} | {e.class_name} | {text_display}")
-
-    if len(elements) > limit:
-        print(f"... 还有 {len(elements) - limit} 个元素")
+        desc_display = (
+            (e.content_desc[:20] + "...") if len(e.content_desc) > 20 else e.content_desc
+        )
+        print(f"[{e.ref}] {clickable_flag} {bounds_str} | {e.class_name} | text='{text_display}' desc='{desc_display}'")
