@@ -362,16 +362,32 @@ function submitPassword() {
         if (!r.ok) throw new Error('invalid');
         return r.json();
     }).then(data => {
-        const agent = data.agents.find(a => a.agentId === S.pendingMachineId);
-        if (!agent) {
-            document.getElementById('pwdError').textContent = '⚠️ 主机不在线，请稍后重试';
-            document.getElementById('pwdError').style.display = 'block';
-            updateStatus('offline', '未连接');
-            return;
-        }
         S.accessToken = pw;
-        hidePasswordModal();
-        doConnect(S.pendingMachineId);
+        S.machines = data.agents || [];
+        var pwdField = document.getElementById('serverPassword');
+        var listDiv = document.getElementById('pwdMachineList') || document.createElement('div');
+        listDiv.id = 'pwdMachineList';
+        listDiv.style.cssText = 'max-height:250px;overflow-y:auto;margin:10px 0;';
+        if (S.machines.length === 0) {
+            listDiv.innerHTML = '<div style="color:#888;text-align:center;padding:20px;">没有在线主机</div>';
+        } else {
+            listDiv.innerHTML = '';
+            S.machines.forEach(function(a) {
+                var div = document.createElement('div');
+                div.style.cssText = 'padding:10px 12px;cursor:pointer;border-radius:6px;margin-bottom:4px;background:#2a2a2a;color:#e0e0e0;';
+                div.innerHTML = '<div style="font-weight:500">' + (a.hostname||'Unknown') + '</div><div style="font-size:12px;color:#888">' + (a.os||'Windows') + '</div>';
+                div.onclick = function() {
+                    if (!a.online) { alert('该主机当前不在线'); return; }
+                    S.pendingMachineId = a.agentId;
+                    hidePasswordModal();
+                    doConnect(a.agentId);
+                };
+                listDiv.appendChild(div);
+            });
+        }
+        pwdField.style.display = 'none';
+        if (!document.getElementById('pwdMachineList')) pwdField.parentNode.insertBefore(listDiv, pwdField.nextSibling);
+        updateStatus('online', '已连接');
     }).catch(() => {
         document.getElementById('pwdError').textContent = '❌ 密码错误';
         document.getElementById('pwdError').style.display = 'block';

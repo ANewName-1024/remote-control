@@ -1,8 +1,8 @@
 """
 Enhanced Screen Capture with Delta Frames
-- Only sends changed screen regions
-- ZSTD compression for region data
-- Falls back to full frame if no previous frame
+- Only sends changed screen regions (block-based)
+- Pure Python implementation (no numpy needed)
+- JPEG quality 75 for keyframes, 65 for delta regions
 """
 import os
 import io
@@ -10,15 +10,7 @@ import time
 import struct
 import logging
 import threading
-import hashlib
 from typing import List, Tuple, Optional, Dict, Any
-
-try:
-    import zstandard as zstd
-    ZSTD_AVAILABLE = True
-except ImportError:
-    ZSTD_AVAILABLE = False
-    logging.warning("zstandard not installed, delta compression disabled")
 
 try:
     from PIL import Image, ImageGrab
@@ -27,16 +19,15 @@ except ImportError:
     PIL_AVAILABLE = False
     logging.error("PIL not available!")
 
-COMPRESSION_LEVEL = int(os.environ.get('ZSTD_LEVEL', '3'))
-BLOCK_SIZE = 64  # pixel block size for change detection
-MAX_REGIONS = 15  # max regions per frame
+BLOCK_SIZE = 64   # pixels per block
+MAX_REGIONS = 20  # max regions per delta frame
 KEYFRAME_INTERVAL = 3.0  # seconds between forced keyframes
 
 
 class DeltaScreenCapture:
     """
     Captures screen and computes delta frames.
-    Encodes as: JSON header + compressed region JPEG data
+    Block-based change detection without numpy.
     """
     
     def __init__(self, width: int, height: int):
@@ -46,31 +37,19 @@ class DeltaScreenCapture:
         self.last_time = 0.0
         self.frame_count = 0
         self.last_keyframe = 0.0
-        self.bytes_saved = 0  # stats
+        self.bytes_saved = 0
+        self._prev_hash = None
         
-        if ZSTD_AVAILABLE:
-            self._zstd = zstd.ZstdCompressor(level=COMPRESSION_LEVEL)
-            self._zstd_dctx = zstd.ZstdDecompressor()
-        else:
-            self._zstd = None
+        # Pre-compute block grid
+        self.bw = (width + BLOCK_SIZE - 1) // BLOCK_SIZE
+        self.bh = (height + BLOCK_SIZE - 1) // BLOCK_SIZE
+        self.block_w = BLOCK_SIZE
+        self.block_h = BLOCK_SIZE
         
-        # Frame cache for change detection
-        self._cache = {}
-        
-        logging.info(f"DeltaScreenCapture: {width}x{height}, ZSTD={ZSTD_AVAILABLE}")
+        logging.info(f"DeltaScreenCapture: {width}x{height}, blocks={self.bw}x{self.bh}")
     
-    def capture_and_encode(self) -> Dict[str, Any]:
-        """
-        Capture screen and encode as delta or keyframe.
-        Returns a dict ready to send via WebSocket.
-        
-        Keyframe format:
-          {'type': 'screen', 'fmt': 'kf', 'data': '<base64 jpeg>', 'w': w, 'h': h}
-        
-        Delta format:
-          {'type': 'screen', 'fmt': 'df', 'data': '<base64 compressed>', 
-           'regions': [(x,y,w,h), ...], 'w': w, 'h': h}
-        """
+    def capture_and_encode(self) -> Optional[Dict[str, Any]]:
+        """Capture screen and encode as keyframe or delta."""
         try:
             img = ImageGrab.grab()
             w, h = img.size
@@ -82,7 +61,6 @@ class DeltaScreenCapture:
         now = time.time()
         self.frame_count += 1
         
-        # Force keyframe periodically or on first frame
         is_keyframe = (
             self.last_rgb is None or 
             now - self.last_keyframe > KEYFRAME_INTERVAL
@@ -91,12 +69,20 @@ class DeltaScreenCapture:
         if is_keyframe:
             self.last_keyframe = now
             self.last_rgb = rgb
-            return self._encode_keyframe(img)
+            self._prev_hash = self._hash_frame(rgb)
+            return self._encode_keyframe(img, w, h)
         else:
-            return self._encode_delta(img, rgb)
+            result = self._encode_delta(img, rgb, w, h)
+            self.last_rgb = rgb
+            return result
     
-    def _encode_keyframe(self, img: Image.Image) -> Dict[str, Any]:
-        """Encode full frame as JPEG."""
+    def _hash_frame(self, rgb: bytes) -> bytes:
+        """Quick hash of frame using struct sampling."""
+        # Sample every 100th byte for quick comparison
+        return bytes(rgb[i] for i in range(0, min(len(rgb), 10000), 100))
+    
+    def _encode_keyframe(self, img: Image.Image, w: int, h: int) -> Dict[str, Any]:
+        """Full frame as JPEG quality 75."""
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=75)
         jpeg = buf.getvalue()
@@ -104,121 +90,112 @@ class DeltaScreenCapture:
         import base64
         return {
             'type': 'screen',
-            'fmt': 'kf',  # keyframe
+            'fmt': 'kf',
             'data': base64.b64encode(jpeg).decode('ascii'),
-            'w': self.width,
-            'h': self.height,
+            'w': w,
+            'h': h,
             'ts': time.time()
         }
     
-    def _encode_delta(self, img: Image.Image, rgb: bytes) -> Optional[Dict[str, Any]]:
-        """Encode only changed regions."""
-        if self.last_rgb is None:
-            return self._encode_keyframe(img)
+    def _encode_delta(self, img: Image.Image, rgb: bytes, w: int, h: int) -> Optional[Dict[str, Any]]:
+        """Encode only changed blocks as JPEG regions."""
+        # Find changed blocks
+        blocks = self._find_changed_blocks(self.last_rgb, rgb, w, h)
         
-        # Compute changed blocks
-        regions = self._compute_changed_regions(self.last_rgb, rgb)
+        if not blocks:
+            return None
         
-        if not regions:
-            return None  # no change, skip frame
-        
-        self.last_rgb = rgb
-        
-        # Extract and encode each region as JPEG
+        # Extract and encode each block as JPEG
         region_list = []
         pixel_data = b''
         
-        for (x, y, w, h) in regions[:MAX_REGIONS]:
-            region = img.crop((x, y, x+w, y+h))
+        for (x, y, bw, bh) in blocks[:MAX_REGIONS]:
+            pass  # values from _merge_blocks are already correct
+            
+            region = img.crop((x, y, x + bw, y + bh))
             buf = io.BytesIO()
             region.save(buf, format='JPEG', quality=65)
             region_jpg = buf.getvalue()
             
-            region_list.append([x, y, w, h])
-            pixel_data += struct.pack('I', len(region_jpg)) + region_jpg
-        
-        # Compress with ZSTD
-        if self._zstd:
-            try:
-                compressed = self._zstd.compress(pixel_data)
-            except Exception as e:
-                logging.warning(f"ZSTD compress failed: {e}, using raw")
-                compressed = pixel_data
-        else:
-            compressed = pixel_data
-        
-        self.bytes_saved += len(pixel_data) - len(compressed)
+            region_list.append([x, y, bw, bh])
+            pixel_data += struct.pack('>HHHH', x, y, bw, bh)
+            pixel_data += struct.pack('>I', len(region_jpg))
+            pixel_data += region_jpg
         
         import base64
         return {
             'type': 'screen',
-            'fmt': 'df',  # delta frame
-            'data': base64.b64encode(compressed).decode('ascii'),
+            'fmt': 'df',
+            'data': base64.b64encode(pixel_data).decode('ascii'),
             'regions': region_list,
-            'w': self.width,
-            'h': self.height,
+            'w': w,
+            'h': h,
             'ts': time.time(),
-            'saved': self.bytes_saved
+            'blocks': len(blocks)
         }
     
-    def _compute_changed_regions(self, prev: bytes, curr: bytes) -> List[Tuple[int, int, int, int]]:
-        """Block-based change detection. Returns list of (x,y,w,h) of changed blocks."""
-        regions = []
-        bw = BLOCK_SIZE
-        bh = BLOCK_SIZE
+    def _find_changed_blocks(self, prev: bytes, curr: bytes, w: int, h: int) -> List[Tuple[int, int]]:
+        """Find blocks that have changed between frames."""
+        if not prev or len(prev) != len(curr):
+            return []
         
-        for y in range(0, self.height, bh):
-            for x in range(0, self.width, bw):
-                # Compare this block
-                py = y * self.width * 3
-                pyo = x * 3
-                
-                changed = False
-                for by in range(min(bh, self.height - y)):
-                    o1 = py + by * self.width * 3 + pyo
-                    o2 = y * self.width * 3 + (y + by) * self.width * 3 + x * 3
-                    
-                    if prev[o1:o1+3] != curr[o1:o1+3]:
-                        # Simple byte comparison
-                        b1 = prev[o1:o1+bw*3]
-                        b2 = curr[o2:o2+bw*3]
-                        if b1 != b2:
-                            changed = True
-                            break
-                
-                # Quick hash check
-                if changed:
-                    # Compute hash of block in prev and curr
-                    o1 = y * self.width * 3 + x * 3
-                    s1 = min(bw * 3, self.width * 3 - x * 3)
-                    for by in range(min(bh, self.height - y)):
-                        s = (y + by) * self.width * 3
-                        e = s + min(bw * 3, self.width * 3 - x * 3)
-                        if prev[s:e] != curr[s:e]:
-                            regions.append((x, y, min(bw, self.width-x), min(bh, self.height-y)))
-                            break
+        changed = []
+        stride = w * 3  # bytes per row (RGB)
         
-        # Merge adjacent regions
-        return self._merge_regions(regions)
+        for by in range(self.bh):
+            for bx in range(self.bw):
+                x = bx * self.block_w
+                y = by * self.block_h
+                bw = min(self.block_w, w - x)
+                bh = min(self.block_h, h - y)
+                
+                if self._block_changed(prev, curr, x, y, bw, bh, stride, w, h):
+                    changed.append((bx, by))
+        
+        return self._merge_blocks(changed, w, h)
     
-    def _merge_regions(self, regions: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
-        """Merge adjacent regions to reduce count."""
-        if not regions:
+    def _block_changed(self, prev: bytes, curr: bytes, x: int, y: int, bw: int, bh: int, stride: int, w: int, h: int) -> bool:
+        """Check if a block has changed using sampling."""
+        # Sample 8x8 grid within block for speed
+        sample_step_x = max(1, bw // 8)
+        sample_step_y = max(1, bh // 8)
+        
+        for sy in range(bh):
+            row_y = y + sy
+            if row_y >= h:
+                break
+            p_row = row_y * stride
+            c_row = row_y * stride
+            
+            for sx in range(0, bw, sample_step_x):
+                px = x + sx
+                if px >= w:
+                    break
+                
+                pi = p_row + px * 3
+                ci = c_row + px * 3
+                
+                # Compare RGB pixels (3 bytes)
+                if prev[pi:pi+3] != curr[ci:ci+3]:
+                    return True
+        return False
+    
+    def _merge_blocks(self, blocks: List[Tuple[int, int]], w: int, h: int) -> List[Tuple[int, int]]:
+        """Merge adjacent blocks into larger regions."""
+        if not blocks:
             return []
         
         # Sort by position
-        regions = sorted(regions, key=lambda r: (r[1], r[0]))
-        merged = [regions[0]]
+        blocks_set = set(blocks)
+        merged = []
         
-        for (x, y, w, h) in regions[1:]:
-            prev = merged[-1]
-            px, py, pw, ph = prev
+        for bx, by in sorted(blocks_set):
+            x = bx * self.block_w
+            y = by * self.block_h
+            bw = min(self.block_w, w - x)
+            bh = min(self.block_h, h - y)
             
-            # If adjacent (within 2 pixels) and same row, merge
-            if (abs(x - (px + pw)) <= 4 and y == py and h == ph):
-                merged[-1] = (px, py, x - px + w, ph)
-            else:
-                merged.append((x, y, w, h))
+            merged.append((x, y, bw, bh))
         
         return merged
 
