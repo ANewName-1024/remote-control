@@ -434,7 +434,11 @@ function handleMsg(msg) {
             break;
         case 'auth_failed': showToast(msg.message||'认证失败', 'error'); disconnect(); break;
         case 'agent_offline': showToast('主机已离线', 'error'); disconnect(); break;
-        case 'screen': renderScreen(msg.data); break;
+        case 'screen':
+            if (msg.fmt === 'kf') renderKeyframe(msg.data, msg.w, msg.h);
+            else if (msg.fmt === 'df') renderDeltaFrame(msg);
+            else if (msg.data) renderKeyframe(msg.data);  // legacy format
+            break;
         case 'output': handleOutput(msg); break;
         case 'file_chunk': handleFileChunk(msg); break;
     }
@@ -444,10 +448,58 @@ function send(data) { if (S.ws && S.ws.readyState === WebSocket.OPEN) S.ws.send(
 
 // ============ Screen ============
 function renderScreen(b64) {
+    renderKeyframe(b64);
+}
+
+function renderKeyframe(b64, w, h) {
     if (!S.screenCtx) return;
     const img = new Image();
-    img.onload = () => { canvas.width = img.width; canvas.height = img.height; S.screenCtx.drawImage(img,0,0); };
+    img.onload = () => {
+        if (!w) w = img.width;
+        if (!h) h = img.height;
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        }
+        S.screenCtx.clearRect(0, 0, canvas.width, canvas.height);
+        S.screenCtx.drawImage(img, 0, 0);
+    };
     img.src = 'data:image/jpeg;base64,' + b64;
+}
+
+function renderDeltaFrame(msg) {
+    if (!S.screenCtx) return;
+    try {
+        const binaryStr = atob(msg.data);
+        const len = binaryStr.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = binaryStr.charCodeAt(i);
+        
+        const view = new DataView(bytes.buffer);
+        let offset = 0;
+        const regions = msg.regions || [];
+        
+        for (let i = 0; i < regions.length; i++) {
+            const [x, y, w, h] = regions[i];
+            if (offset + 4 > bytes.length) break;
+            const chunkSize = view.getUint32(offset, false);
+            offset += 4;
+            if (offset + chunkSize > bytes.length) break;
+            
+            const jpgBytes = bytes.slice(offset, offset + chunkSize);
+            const jpgBase64 = btoa(String.fromCharCode.apply(null, jpgBytes));
+            offset += chunkSize;
+            
+            const tmpImg = new Image();
+            tmpImg.onload = () => {
+                S.screenCtx.drawImage(tmpImg, x, y, w, h);
+            };
+            tmpImg.src = 'data:image/jpeg;base64,' + jpgBase64;
+        }
+    } catch(e) {
+        console.warn('Delta render error:', e);
+        ws.send(JSON.stringify({type:'req_kf'}));
+    }
 }
 
 // ============ Input Handling ============

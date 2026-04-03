@@ -50,6 +50,13 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+# Enhanced screen capture with delta frames
+try:
+    from enhanced_screen import DeltaScreenCapture, get_screen_size
+except ImportError:
+    DeltaScreenCapture = None
+    logging.warning("enhanced_screen module not found")
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = False
@@ -837,8 +844,9 @@ class RemoteControlApp:
         logging.info(f"Server:   {self.server_url}")
         logging.info(f"Hostname: {self.hostname}")
         
-        # Init screen capture
-        self.screen = ScreenCapture()
+        # Init screen capture (delta-based)
+        sw, sh = get_screen_size()
+        self.screen = DeltaScreenCapture(sw, sh)
         
         # Init tray (optional - don't crash if it fails)
         try:
@@ -928,13 +936,12 @@ class RemoteControlApp:
         self.stream_running = True
         
         def stream_loop():
-            logging.info("Screen streaming started")
+            logging.info("Screen streaming started (delta mode)")
             while self.stream_running and self.authenticated:
                 try:
-                    frame = self.screen.capture()
-                    if frame:
-                        b64 = base64.b64encode(frame).decode('ascii')
-                        self.ws_client.send({'type': 'screen', 'data': b64, 'quality': SCREEN_QUALITY, 'timestamp': time.time()})
+                    msg = self.screen.capture_and_encode()
+                    if msg:
+                        self.ws_client.send(msg)
                 except Exception as e:
                     logging.warning(f"Stream error: {e}")
                 time.sleep(1.0 / SCREEN_FPS)
