@@ -291,7 +291,11 @@ wss.on('connection', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
                     return;
                 }
-                
+
+                // Update lastSeen for ALL messages from authenticated agents
+                const agent = AGENTS.get(agentId);
+                if (agent) agent.lastSeen = Date.now();
+
                 // Handle heartbeat/pong from agent (keepalive)
                 if (msg.type === 'pong') {
                     const agent = AGENTS.get(agentId);
@@ -302,8 +306,6 @@ wss.on('connection', (ws, req) => {
                 
                 // Handle screen frame
                 if (msg.type === 'screen') {
-                    const agent = AGENTS.get(agentId);
-                    if (agent) agent.lastSeen = Date.now();
                     
                     // Relay to all connected clients viewing this agent
                     CLIENTS.forEach((client) => {
