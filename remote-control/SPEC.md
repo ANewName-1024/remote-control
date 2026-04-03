@@ -1,7 +1,7 @@
 # Remote Control System - 远程控制系统
 
-> 当前版本：Phase 1 完成 ✅
-> 最新更新：2026-04-03
+> 当前版本：Phase 1 完成 ✅，Phase 3 Delta Encoder 已实现
+> 最新更新：2026-04-04
 
 ---
 
@@ -18,78 +18,87 @@
 **访问地址：** http://8.137.116.121:9080
 **密码:** `WeiChao_2026Ctrl!`
 
-**关键改进（相比旧架构）：**
-- Agent 直接连 VPS relay，**不需要 SSH 隧道**
-- VPS relay 用 systemd 管理，开机自启
-- 静态 HTML 由 node 服务器提供
-
-**已知问题：**
-- JPEG 编码帧率低（~5fps）
-- 无 ID 寻址，每次需密码认证
-- Agent 掉线后需手动重启
-
 ---
 
-## 二、重构规划
+## 二、Phase 1 完成情况 ✅
 
-### Phase 1：稳定化 ✅ 完成
 - [x] 修复 HTML 重复函数定义（doUpload × 2）
 - [x] Agent 固定 client_id（基于 MAC+主机名哈希）
 - [x] Agent 自动重连（指数退避）
 - [x] VPS relay systemd 服务化
 - [x] 取消 SSH 隧道依赖（架构优化）
-- [ ] SSH 隧道自动重连脚本（已写好，但不再需要）
-
-### Phase 2：Rust 中继服务器
-- [ ] 替换 Node.js，支持 500+ 并发
-- [ ] Agent ID 注册 + WebRTC 信令
-- [ ] 数据中继（打洞失败时）
-- [ ] 部署到 VPS
-
-### Phase 3：Python Agent 重构
-- [ ] H.264 硬件编码（openh264）
-- [ ] WebRTC DataChannel 传输
-- [ ] 剪贴板同步
-- [ ] Agent 开机自启动（Windows 服务）
-
-### Phase 4：React 控制台
-- [ ] 替换单 HTML 文件（移动端问题多）
-- [ ] 组件化维护
-
-### Phase 5：P2P 优化
-- [ ] NAT 打洞（STUN/TURN）
-- [ ] 连接质量自适应
+- [x] **submitPassword 密码验证后显示主机列表**（修复用户看不到在线主机的问题）
+- [x] **浏览器端机器选择流程**（密码验证 → 显示列表 → 点击连接）
 
 ---
 
-## 三、技术选型
+## 三、Phase 3 - Delta Screen Encoder（已实现）
 
-| 模块 | 当前 | 重构后 |
-|------|------|--------|
-| 中继服务器 | Node.js (21112) | Rust + tokio |
-| 屏幕编码 | JPEG | H.264 (openh264) |
-| 传输协议 | WebSocket | WebRTC DataChannel |
-| Web 控制台 | 单 HTML | React + Vite |
-| 服务管理 | nohup | systemd |
-| NAT 穿透 | 无 | STUN + TURN 中继 |
+### 核心模块
+- `agent/enhanced_screen.py` - DeltaScreenCapture 类
+  - 区块变化检测（64×64 像素区块）
+  - 关键帧：每 3 秒强制一次（JPEG 质量 75）
+  - Delta 帧：仅发送变化区域（JPEG 质量 65）
+  - 相邻区域合并（减少传输量）
+  - 二进制格式：big-endian (`>HHHH` x,y,w,h + `>I` size + JPEG)
+
+### Delta Encoder 回归测试结果（5/5 PASS）
+| 测试 | 结果 |
+|------|------|
+| T1 Keyframe 编码 | ✅ PASS (kf, 44KB) |
+| T2 相同帧返回 None | ✅ PASS |
+| T3 满帧变化检测 | ✅ PASS (510 blocks) |
+| T4 小变化 32×32 检测 | ✅ PASS (4 blocks) |
+| T5 二进制 big-endian 格式 | ✅ PASS |
+
+### 发现并修复的 Bug
+1. `_merge_blocks` 返回4值 `(x,y,w,h)` 但循环按2值 `(bx,by)` 解包 → 修复
+2. `_block_changed` 里 prev row offset 计算错误 → 修复
+3. quick hash 预检导致小变化漏检 → 去掉
+4. 二进制格式大小端不统一 → 统一 big-endian
 
 ---
 
-## 四、部署信息
+## 四、待解决
 
-### 服务器 (VPS)
-- 访问地址: `http://8.137.116.121:9080`
-- Relay 端口: 21112
-- nginx 反代: 9080 → 21112
-- 服务管理: `systemctl status remote-control`
-- 日志: `/var/log/remote-control.log`
+### 阻塞项
+- ❌ **H.264 编码**：ffmpeg 安装失败（winget/choco 网络不通）
+
+### 待验证（需真机测试）
+- ⚠️ 端到端画面传输（手机浏览器连接后实际显示）
+- ⚠️ 键盘输入传递
+- ⚠️ 文件上传/下载
+
+### 已知限制
+- Agent 掉线后需手动重启（或等待自动重连）
+- 分辨率较高时 JPEG 编码仍较大
+
+---
+
+## 五、技术指标
+
+| 指标 | 数值 |
+|------|------|
+| 关键帧大小 | ~44KB (1920×1080) |
+| Delta 帧大小 | ~5-20KB（取决于变化区域） |
+| 区块大小 | 64×64 像素 |
+| 关键帧间隔 | 3 秒 |
+| Delta 检测算法 | 采样比较（8×8 网格） |
+| 压缩 | 无（浏览器无 ZSTD 解压） |
+
+---
+
+## 六、部署信息
 
 ### Agent (Windows)
 - 路径: `D:\.openclaw\workspace\remote-control\agent\agent.py`
 - 连接地址: `ws://8.137.116.121:9080/agent`
-- 配置文件: `%APPDATA%\RemoteControlAgent\agent.json`
-- 日志: `%APPDATA%\RemoteControlAgent\agent.log`
 - 启动: `python agent.py`
+
+### VPS Relay
+- 服务管理: `systemctl status remote-control`
+- 日志: `/var/log/remote-control.log`
+- 重启: `systemctl restart remote-control`
 
 ### 文件同步
 - 本地修改后需同步到 VPS: `scp index.html root@8.137.116.121:/home/weichao/remote-control-server/static/`
