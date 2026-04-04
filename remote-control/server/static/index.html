@@ -503,7 +503,13 @@ function renderDeltaFrame(msg) {
             if (offset + chunkSize > bytes.length) break;
             
             const jpgBytes = bytes.slice(offset, offset + chunkSize);
-            const jpgBase64 = btoa(String.fromCharCode.apply(null, jpgBytes));
+            // Safe base64 encoding (avoid String.fromCharCode.apply stack overflow)
+            let jpgBase64 = '';
+            const CHUNK = 8192;
+            for (let j = 0; j < jpgBytes.length; j += CHUNK) {
+                const chunk = Array.from ? Array.from(jpgBytes.slice(j, j + CHUNK)) : Array.prototype.slice.call(jpgBytes.slice(j, j + CHUNK));
+                jpgBase64 += btoa(String.fromCharCode.apply(null, chunk));
+            }
             offset += chunkSize;
             
             const tmpImg = new Image();
