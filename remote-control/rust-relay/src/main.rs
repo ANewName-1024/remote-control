@@ -1,149 +1,157 @@
-//! Remote Control Relay - Rust Implementation (clean architecture)
-//! Key patterns: tokio::sync::RwLock + mpsc::Sender for connection writers
+//! Remote Control Relay - Axum Implementation
+//! Uses Axum WebSocket which is compatible with nginx reverse proxy
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
+    routing::{get, on, MethodFilter},
+    Router,
+};
+use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock as SyncRwLock;
-use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use serde::Serialize;
+use tokio::sync::RwLock;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 #[derive(Clone)]
 struct AppState {
-    agents: Arc<SyncRwLock<HashMap<String, AgentEntry>>>,
-    clients: Arc<SyncRwLock<HashMap<String, ClientEntry>>>,
+    agents: Arc<RwLock<HashMap<String, AgentEntry>>>,
+    clients: Arc<RwLock<HashMap<String, ClientEntry>>>,
     password: String,
     start_time: Instant,
 }
 
 struct AgentEntry {
-    tx: mpsc::Sender<Message>,
-    agent_id: String,
+    tx: tokio::sync::mpsc::Sender<Message>,
+    #[allow(dead_code)]
+    agent_id: String, // kept for potential debug logging
     hostname: String,
     os: String,
     last_seen: Instant,
 }
 
 struct ClientEntry {
-    tx: mpsc::Sender<Message>,
+    tx: tokio::sync::mpsc::Sender<Message>,
     agent_id: Option<String>,
     last_seen: Instant,
 }
 
-fn http_response(status: u16, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-        status,
-        match status { 200 => "OK", 401 => "Unauthorized", 404 => "Not Found", _ => "OK" },
-        body.len(),
-        body
-    )
+#[derive(Serialize)]
+struct StatusResponse {
+    status: String,
+    uptime: f64,
+    agents: usize,
+    clients: usize,
+    version: &'static str,
 }
 
-async fn handle_http(state: AppState, stream: &mut TcpStream, path: &str, auth: Option<&str>) {
+#[derive(Serialize)]
+struct AgentListResponse {
+    agents: Vec<AgentInfo>,
+}
+
+#[derive(Serialize)]
+struct AgentInfo {
+    agent_id: String,
+    hostname: String,
+    os: String,
+    last_seen: i64,
+    online: bool,
+}
+
+async fn handle_status(State(state): State<AppState>) -> axum::Json<StatusResponse> {
     let agents = state.agents.read().await;
     let clients = state.clients.read().await;
+    axum::Json(StatusResponse {
+        status: "online".into(),
+        uptime: state.start_time.elapsed().as_secs_f64(),
+        agents: agents.len(),
+        clients: clients.len(),
+        version: "0.2.0-axum",
+    })
+}
 
-    let resp = match path {
-        "/api/agents" => {
-            let mut authorized = false;
-            if let Some(auth) = auth {
-                if auth.starts_with("Bearer ") {
-                    let token = &auth[7..];
-                    use base64::Engine as _;
-                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(token) {
-                        if let Ok(pw) = String::from_utf8(decoded) {
-                            authorized = pw == state.password;
+async fn handle_agents(State(state): State<AppState>) -> axum::Json<AgentListResponse> {
+    let agents = state.agents.read().await;
+    let list: Vec<AgentInfo> = agents
+        .iter()
+        .map(|(id, a)| AgentInfo {
+            agent_id: id.clone(),
+            hostname: a.hostname.clone(),
+            os: a.os.clone(),
+            last_seen: a.last_seen.elapsed().as_millis() as i64,
+            online: true,
+        })
+        .collect();
+    axum::Json(AgentListResponse { agents: list })
+}
+
+async fn handle_agent_ws(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let state = state.clone();
+    ws.on_upgrade(move |socket| {
+        let state = state.clone();
+        async move {
+            handle_agent_socket(state, socket).await;
+        }
+    })
+}
+
+async fn handle_agent_socket(state: AppState, socket: WebSocket) {
+    let (mut sender, mut receiver) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(32);
+
+    let aid = loop {
+        if let Some(msg) = receiver.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if parsed["type"] == "auth" {
+                            let aid = parsed["agent_id"].as_str().unwrap_or("").to_string();
+                            let hostname = parsed["hostname"].as_str().unwrap_or("?").to_string();
+                            let os = parsed["os"].as_str().unwrap_or("?").to_string();
+                            info!("[Agent] Auth: {} ({})", aid, hostname);
+                            let _ = sender.send(Message::Text(r#"{"type":"auth_ok"}"#.into())).await;
+                            state.agents.write().await.insert(aid.clone(), AgentEntry {
+                                tx: tx.clone(),
+                                agent_id: aid.clone(),
+                                hostname,
+                                os,
+                                last_seen: Instant::now(),
+                            });
+                            break aid;
                         }
                     }
                 }
+                Ok(Message::Close(_)) | Err(_) => return,
+                _ => {}
             }
-            if !authorized {
-                http_response(401, r#"{"error":"Unauthorized"}"#)
-            } else {
-                let list: Vec<_> = agents.iter().map(|(id, a)| {
-                    serde_json::json!({
-                        "agentId": id,
-                        "hostname": a.hostname,
-                        "os": a.os,
-                        "lastSeen": a.last_seen.elapsed().as_millis() as i64,
-                        "online": true
-                    })
-                }).collect();
-                let body = serde_json::json!({ "agents": list }).to_string();
-                http_response(200, &body)
-            }
+        } else {
+            return;
         }
-        "/api/status" => {
-            let body = serde_json::json!({
-                "status": "online",
-                "uptime": state.start_time.elapsed().as_secs_f64(),
-                "agents": agents.len(),
-                "clients": clients.len(),
-                "version": "0.1.0-rust"
-            }).to_string();
-            http_response(200, &body)
-        }
-        "/" => {
-            let body = format!(
-                r#"<html><body><h1>Remote Control Relay v0.1-rust</h1><p>Online</p><p>Agents: {}</p><p>Clients: {}</p><p>Uptime: {:.0}s</p></body></html>"#,
-                agents.len(), clients.len(), state.start_time.elapsed().as_secs_f64()
-            );
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(), body
-            )
-        }
-        _ => http_response(404, r#"{"error":"Not Found"}"#),
-    };
-
-    stream.write_all(resp.as_bytes()).await.ok();
-}
-
-async fn handle_agent(state: AppState, stream: TcpStream) {
-    let ws = match accept_async(stream).await {
-        Ok(ws) => ws,
-        Err(e) => { tracing::warn!("WS accept error: {}", e); return; }
-    };
-    let (mut ws_tx, mut ws_rx) = ws.split();
-    let (tx, mut rx) = mpsc::channel::<Message>(32);
-
-    let aid = loop {
-        if let Some(Ok(Message::Text(text))) = ws_rx.next().await {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                if parsed["type"] == "auth" {
-                    let aid = parsed["agent_id"].as_str().unwrap_or("").to_string();
-                    let hostname = parsed["hostname"].as_str().unwrap_or("?").to_string();
-                    let os = parsed["os"].as_str().unwrap_or("?").to_string();
-                    info!("[Agent] Auth: {} ({})", aid, hostname);
-                    let _ = ws_tx.send(Message::Text(r#"{"type":"auth_ok"}"#.into())).await;
-                    state.agents.write().await.insert(aid.clone(), AgentEntry {
-                        tx: tx.clone(),
-                        agent_id: aid.clone(),
-                        hostname,
-                        os,
-                        last_seen: Instant::now(),
-                    });
-                    break aid;
-                }
-            }
-        } else { return; }
     };
 
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if ws_tx.send(msg).await.is_err() { break; }
+            if sender.send(msg).await.is_err() {
+                break;
+            }
         }
     });
 
     loop {
         tokio::select! {
-            msg = ws_rx.next() => {
+            msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -187,27 +195,45 @@ async fn handle_agent(state: AppState, stream: TcpStream) {
     info!("[Agent] {} disconnected", aid);
 }
 
-async fn handle_client(state: AppState, stream: TcpStream) {
-    let ws = match accept_async(stream).await {
-        Ok(ws) => ws,
-        Err(e) => { tracing::warn!("WS accept error: {}", e); return; }
-    };
-    let (mut ws_tx, mut ws_rx) = ws.split();
-    let (tx, mut rx) = mpsc::channel::<Message>(32);
+async fn handle_client_ws(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let state = state.clone();
+    ws.on_upgrade(move |socket| {
+        let state = state.clone();
+        async move {
+            handle_client_socket(state, socket).await;
+        }
+    })
+}
 
+async fn handle_client_socket(state: AppState, socket: WebSocket) {
+    let (mut sender, mut receiver) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(32);
+
+    // Auth
     loop {
-        if let Some(Ok(Message::Text(text))) = ws_rx.next().await {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                if parsed["type"] == "auth" {
-                    if parsed["password"].as_str().unwrap_or("") != state.password {
-                        let _ = ws_tx.send(Message::Text(r#"{"type":"error","message":"Invalid password"}"#.into())).await;
-                        return;
+        if let Some(msg) = receiver.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if parsed["type"] == "auth" {
+                            if parsed["password"].as_str().unwrap_or("") != state.password {
+                                let _ = sender.send(Message::Text(r#"{"type":"error","message":"Invalid password"}"#.into())).await;
+                                return;
+                            }
+                            let _ = sender.send(Message::Text(r#"{"type":"auth_ok"}"#.into())).await;
+                            break;
+                        }
                     }
-                    let _ = ws_tx.send(Message::Text(r#"{"type":"auth_ok"}"#.into())).await;
-                    break;
                 }
+                Ok(Message::Close(_)) | Err(_) => return,
+                _ => {}
             }
-        } else { return; }
+        } else {
+            return;
+        }
     }
 
     let cid = uuid::Uuid::new_v4().to_string();
@@ -219,13 +245,15 @@ async fn handle_client(state: AppState, stream: TcpStream) {
 
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if ws_tx.send(msg).await.is_err() { break; }
+            if sender.send(msg).await.is_err() {
+                break;
+            }
         }
     });
 
     loop {
         tokio::select! {
-            msg = ws_rx.next() => {
+            msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -245,7 +273,6 @@ async fn handle_client(state: AppState, stream: TcpStream) {
                                         if let Some(c) = state.clients.write().await.get_mut(&cid) {
                                             c.agent_id = Some(aid.to_string());
                                         }
-                                        // Send through mpsc to avoid ws_tx double-move
                                         tx.send(Message::Text(r#"{"type":"subscribed"}"#.into())).await.ok();
                                     }
                                 }
@@ -279,54 +306,42 @@ async fn handle_client(state: AppState, stream: TcpStream) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let password = std::env::var("ACCESS_PASSWORD").unwrap_or_else(|_| "WeiChao_2026Ctrl!".to_string());
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "21112".to_string())
+        .parse()
+        .unwrap_or(21112);
+
     let state = AppState {
         agents: Arc::new(RwLock::new(HashMap::new())),
         clients: Arc::new(RwLock::new(HashMap::new())),
-        password: std::env::var("ACCESS_PASSWORD").unwrap_or_else(|_| "Ops@2024!".to_string()),
+        password,
         start_time: Instant::now(),
     };
-    let port = std::env::var("PORT").unwrap_or_else(|_| "21112".to_string());
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
-    info!("Remote Control Relay v0.1-rust listening on {}", addr);
 
-    loop {
-        if let Ok((stream, _)) = listener.accept().await {
-            let state = state.clone();
-            tokio::spawn(async move {
-                let mut buf = [0u8; 2048];
-                let n = match stream.peek(&mut buf).await {
-                    Ok(n) if n > 0 => n,
-                    _ => return,
-                };
-                let request = match std::str::from_utf8(&buf[..n]) {
-                    Ok(s) => s.to_string(),
-                    Err(_) => return,
-                };
-                let is_ws = request.contains("Upgrade: websocket");
-                let path = request.lines().next()
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .unwrap_or("/")
-                    .to_string();
-                let auth = request.lines()
-                    .find(|l| l.to_lowercase().starts_with("authorization:"))
-                    .and_then(|l| l.split(':').nth(1))
-                    .map(str::trim);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
-                let mut stream = stream;
-                stream.read(&mut buf).await.ok();
+    let app = Router::new()
+        .route("/api/status", get(handle_status))
+        .route("/api/agents", get(handle_agents))
+        .route("/agent", on(MethodFilter::GET, handle_agent_ws))
+        .route("/client", on(MethodFilter::GET, handle_client_ws))
+        .route("/", get(|| async { "Remote Control Relay v0.2-axum" }))
+        .layer(cors)
+        .with_state(state);
 
-                if is_ws {
-                    match path.as_str() {
-                        "/agent" => handle_agent(state, stream).await,
-                        "/client" => handle_client(state, stream).await,
-                        _ => {}
-                    }
-                } else {
-                    handle_http(state, &mut stream, &path, auth).await;
-                }
-            });
-        }
-    }
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    info!("Remote Control Relay v0.2-axum listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
