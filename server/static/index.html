@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>远程控制台</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{--bg:#0f0f0f;--panel:#1a1a1a;--border:#2a2a2a;--text:#e0e0e0;--text-dim:#888;--accent:#00d4aa;--danger:#ff4444;--success:#44ff88}
+        body{background:var(--bg);color:var(--text);font-family:-apple-system,'Segoe UI',sans-serif;height:100vh;overflow:hidden;display:flex;flex-direction:column}
+        .header{background:var(--panel);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0}
+        .header-left{display:flex;align-items:center;gap:12px;flex:1;min-width:0}
+        .logo{font-size:18px;font-weight:700;color:var(--accent);white-space:nowrap}
+        .status-badge{padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:5px;white-space:nowrap}
+        .status-badge.offline{background:#2a2a2a;color:#888}.status-badge.online{background:#0a2a1a;color:var(--success)}.status-badge.connecting{background:#2a2a0a;color:#cccc00}
+        .status-dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+        .agent-id{font-size:11px;color:var(--text-dim);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .header-right{display:flex;gap:8px;flex-shrink:0}
+        .btn{padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:13px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:5px}
+        .btn:hover{background:#252525}.btn:active{transform:scale(.97)}
+        .btn.primary{background:var(--accent);color:#000;border-color:var(--accent);font-weight:600}
+        .btn.primary:hover{background:#00e8bb}.btn.danger{border-color:var(--danger);color:var(--danger)}
+        .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+        .screen-container{flex:1;background:#000;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;min-height:200px}
+        #screen{max-width:100%;max-height:100%;object-fit:contain;cursor:crosshair;touch-action:none}
+        .machine-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:20px;flex:1;overflow-y:auto;align-content:start}
+        .machine-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px 16px;cursor:pointer;transition:all .2s;text-align:center}
+        .machine-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 4px 20px rgba(0,212,170,.15)}
+        .machine-card .icon{font-size:44px;margin-bottom:10px}
+        .machine-card .name{font-size:14px;font-weight:600;margin-bottom:4px}
+        .machine-card .meta{font-size:12px;color:var(--text-dim)}
+        .machine-card .status{font-size:11px;padding:3px 10px;border-radius:10px;display:inline-block;margin-top:8px}
+        .machine-card .status.online{background:#0a2a1a;color:var(--success)}
+        .machine-card .status.offline{background:#2a2a2a;color:#888}
+        .empty-state{text-align:center;padding:60px 20px;color:var(--text-dim)}
+        .empty-state .icon{font-size:56px;margin-bottom:16px}
+        .empty-state h3{margin-bottom:8px;color:var(--text);font-size:18px}
+        .empty-state p{font-size:14px;line-height:1.6}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto}
+        .password-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;align-items:center;justify-content:center}
+        .password-modal.show{display:flex}
+        .password-modal .box{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:32px;width:90%;max-width:380px;text-align:center}
+        .password-modal .box h3{margin-bottom:6px;font-size:20px}
+        .password-modal .box .machine-name{color:var(--accent);margin-bottom:20px;font-size:15px;font-weight:600}
+        .password-modal .box input{width:100%;background:#0d0d0d;border:1px solid var(--border);color:var(--text);padding:12px 14px;border-radius:8px;font-size:15px;font-family:monospace;margin-bottom:10px;box-sizing:border-box}
+        .password-modal .box input:focus{outline:none;border-color:var(--accent)}
+        .password-modal .box .error-msg{color:var(--danger);font-size:13px;margin-bottom:10px;display:none}
+        .password-modal .box .actions{display:flex;gap:10px;justify-content:center;margin-top:16px}
+        .zoom-controls{position:absolute;bottom:10px;right:10px;display:flex;gap:5px;background:rgba(0,0,0,.7);border-radius:8px;padding:5px 8px}
+        .zoom-btn{width:28px;height:28px;border-radius:5px;border:none;background:rgba(255,255,255,.1);color:#fff;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center}
+        .zoom-btn:hover{background:rgba(255,255,255,.2)}
+        .zoom-label{color:#fff;font-size:12px;display:flex;align-items:center;padding:0 6px}
+        .quick-actions{background:var(--panel);border-top:1px solid var(--border);padding:8px 12px;display:flex;gap:6px;overflow-x:auto;flex-shrink:0}
+        .quick-btn{padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-dim);font-size:12px;cursor:pointer;white-space:nowrap}
+        .quick-btn:hover{background:#252525;color:var(--text)}
+        .tab-bar{background:var(--panel);border-top:1px solid var(--border);display:flex;flex-shrink:0}
+        .tab{flex:1;padding:10px;text-align:center;font-size:13px;color:var(--text-dim);cursor:pointer;border-top:2px solid transparent;transition:all .15s}
+        .tab.active{color:var(--accent);border-top-color:var(--accent)}
+        .panel{display:none;flex-direction:column;height:200px;overflow:hidden}
+        .panel.active{display:flex}
+        .panel-terminal{flex:1;overflow-y:auto;padding:12px;font-family:'Consolas','Monaco',monospace;font-size:13px;background:#0d0d0d}
+        .terminal-line{line-height:1.6;word-break:break-all}.terminal-line.output{color:#b0b0b0}.terminal-line.error{color:var(--danger)}.terminal-line.info{color:var(--accent)}.terminal-line.cmd{color:#88ff88}
+        .terminal-input-row{display:flex;align-items:center;padding:8px 12px;background:#151515;border-top:1px solid var(--border);gap:8px;flex-shrink:0}
+        .terminal-prompt{color:var(--accent);font-family:monospace;font-size:13px;flex-shrink:0}
+        .terminal-input{flex:1;background:transparent;border:none;color:var(--text);font-family:monospace;font-size:13px;outline:none}
+        .file-list{flex:1;overflow-y:auto;padding:8px}
+        .file-item{display:flex;align-items:center;padding:8px 10px;border-radius:6px;gap:10px}
+        .file-item:hover{background:#1e1e1e}
+        .file-icon{font-size:20px}.file-info{flex:1;min-width:0}.file-name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .file-meta{font-size:11px;color:var(--text-dim)}
+        .file-upload-bar{padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-shrink:0}
+        .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
+        .modal-overlay.show{display:flex}
+        .modal{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:24px;width:90%;max-width:400px}
+        .modal h3{margin-bottom:16px;font-size:16px}
+        .modal-input{width:100%;background:#0d0d0d;border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:8px;font-size:14px;font-family:monospace;margin-bottom:12px;box-sizing:border-box}
+        .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+        .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%) translateY(100px);background:#222;border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;font-size:13px;z-index:300;transition:transform .3s ease;pointer-events:none}
+        .toast.show{transform:translateX(-50%) translateY(0)}.toast.error{border-color:var(--danger);color:var(--danger)}.toast.success{border-color:var(--success);color:var(--success)}
+        .info-grid{padding:16px;font-size:13px;line-height:2}
+        .info-row{display:flex;gap:8px}
+        .info-label{color:var(--text-dim);min-width:80px}
+        .refresh-bar{background:var(--panel);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+        .refresh-bar .label{font-size:12px;color:var(--text-dim)}
+        .refresh-btn{padding:5px 12px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-dim);font-size:12px;cursor:pointer}
+        .refresh-btn:hover{background:#252525;color:var(--text)}
+        @media(max-width:600px){.header{padding:8px 12px}.logo{font-size:15px}.btn{padding:6px 10px;font-size:12px}.agent-id{display:none}.quick-actions{padding:6px 8px}.quick-btn{padding:5px 10px;font-size:11px}.panel{height:180px}.machine-grid{grid-template-columns:repeat(2,1fr);gap:8px;padding:12px}}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <span class="logo">🖥️ 远程控制</span>
+            <div class="status-badge offline" id="statusBadge"><span class="status-dot"></span><span id="statusText">未连接</span></div>
+            <span class="agent-id" id="agentIdDisplay"></span>
+        </div>
+        <div class="header-right">
+            <button class="btn" id="btnConnect" onclick="showMachineGrid()">切换主机</button>
+            <button class="btn danger" id="btnDisconnect" style="display:none" onclick="disconnect()">断开</button>
+        </div>
+    </div>
+
+    <!-- Machine Selection View -->
+    <div id="machineView" style="display:flex;flex-direction:column;flex:1;overflow:hidden">
+        <div class="refresh-bar">
+            <span class="label">📡 在线主机 <span id="machineCount">(0)</span></span>
+            <button class="refresh-btn" onclick="showPasswordModal()">🔐 输入密码</button>
+            <button class="refresh-btn" onclick="refreshMachines()">🔄 刷新</button>
+        </div>
+        <div style="flex:1;overflow-y:auto" id="scrollArea">
+            <div id="loadingState" class="empty-state">
+                <div class="spinner"></div>
+                <p style="margin-top:16px">正在搜索主机...</p>
+            </div>
+            <div id="emptyState" class="empty-state" style="display:none">
+                <div class="icon">🖥️</div>
+                <h3>暂无在线主机</h3>
+                <p>等待 Agent 上线<br>或检查网络连接</p>
+                <button class="btn primary" style="margin-top:16px" onclick="refreshMachines()">刷新</button>
+            </div>
+            <div id="errorState" class="empty-state" style="display:none">
+                <div class="icon">⚠️</div>
+                <h3>服务器离线</h3>
+                <p>无法连接到控制服务器</p>
+                <button class="btn primary" style="margin-top:16px" onclick="refreshMachines()">重试</button>
+            </div>
+            <div class="machine-grid" id="machineGrid" style="display:none"></div>
+        </div>
+    </div>
+
+    <!-- Remote Control View -->
+    <div class="main" id="controlView" style="display:none">
+        <div class="screen-container" id="ctrlContainer">
+            <canvas id="screen" style="display:none"></canvas>
+            <div class="zoom-controls" id="zoomControls" style="display:none">
+                <button class="zoom-btn" onclick="zoomOut()">−</button>
+                <span class="zoom-label" id="zoomLabel">100%</span>
+                <button class="zoom-btn" onclick="zoomIn()">+</button>
+            </div>
+        </div>
+        <div class="quick-actions" id="quickActions" style="display:none">
+            <button class="quick-btn" onclick="sendHotkey('ctrl','alt','delete')">Ctrl+Alt+Del</button>
+            <button class="quick-btn" onclick="sendHotkey('alt','tab')">Alt+Tab</button>
+            <button class="quick-btn" onclick="sendHotkey('win')">Win</button>
+            <button class="quick-btn" onclick="sendHotkey('alt','f4')">Alt+F4</button>
+            <button class="quick-btn" onclick="screenshot()">📸 截图</button>
+            <button class="quick-btn" onclick="lockScreen()">🔒 锁屏</button>
+            <button class="quick-btn" onclick="blankScreen()">🖥️ 黑屏</button>
+        </div>
+        <div class="tab-bar" id="tabBar" style="display:none">
+            <div class="tab active" onclick="switchTab('terminal')">终端</div>
+            <div class="tab" onclick="switchTab('files')">文件</div>
+            <div class="tab" onclick="switchTab('info')">信息</div>
+        </div>
+        <div class="panel active" id="panelTerminal">
+            <div class="panel-terminal" id="terminalOutput"></div>
+            <div class="terminal-input-row">
+                <span class="terminal-prompt">$</span>
+                <input class="terminal-input" id="terminalInput" placeholder="输入命令后回车执行" onkeydown="handleTerminalInput(event)">
+            </div>
+        </div>
+        <div class="panel" id="panelFiles">
+            <div class="file-list" id="fileList">
+                <div style="padding:20px;text-align:center;color:var(--text-dim)">暂无文件<br><br><button class="btn" onclick="showUploadModal()">上传文件到主机</button></div>
+            </div>
+            <div class="file-upload-bar">
+                <button class="btn" onclick="showDownloadModal()">📥 从主机下载</button>
+                <button class="btn" onclick="showUploadModal()">📤 上传到主机</button>
+            </div>
+        </div>
+        <div class="panel" id="panelInfo">
+            <div class="info-grid">
+                <div class="info-row"><span class="info-label">主机名:</span><span id="infoHostname">-</span></div>
+                <div class="info-row"><span class="info-label">操作系统:</span><span id="infoOS">-</span></div>
+                <div class="info-row"><span class="info-label">延迟:</span><span id="infoLatency">-</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Password Modal -->
+    <div class="password-modal" id="passwordModal">
+        <div class="box">
+            <h3>🔒 连接需验证</h3>
+            <div class="machine-name" id="pwdMachineName">-</div>
+            <input type="password" id="serverPassword" placeholder="输入访问密码" onkeydown="handlePwdKeydown(event)">
+            <div class="error-msg" id="pwdError">密码错误</div>
+            <div class="actions">
+                <button class="btn" onclick="hidePasswordModal()">取消</button>
+                <button class="btn primary" onclick="submitPassword()">连接</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Download Modal -->
+    <div class="modal-overlay" id="downloadModal">
+        <div class="modal">
+            <h3>从主机下载文件</h3>
+            <input class="modal-input" id="downloadPath" placeholder="完整路径, 例如 C:\Users\test\file.pdf">
+            <input class="modal-input" id="downloadFilename" placeholder="保存为 (可选)">
+            <div class="modal-actions">
+                <button class="btn" onclick="hideDownloadModal()">取消</button>
+                <button class="btn primary" onclick="doDownload()">下载</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Modal -->
+    <div class="modal-overlay" id="uploadModal">
+        <div class="modal">
+            <h3>上传文件到主机</h3>
+            <input type="file" id="uploadFileInput" style="margin-bottom:12px;color:var(--text)">
+            <input class="modal-input" id="uploadPath" placeholder="目标目录, 例如 C:\Users\test\">
+            <div class="modal-actions">
+                <button class="btn" onclick="hideUploadModal()">取消</button>
+                <button class="btn primary" onclick="doUpload()">上传</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+<script>
+// ============ State ============
+const S = {
+    ws: null, connected: false, agentId: null, clientId: null,
+    accessToken: null, zoom: 1, execCounter: 0, screenCtx: null,
+    pendingFiles: new Map(), machines: [], refreshTimer: null,
+    pendingMachineId: null
+};
+
+let canvas = null, container = null;
+
+// ============ Init ============
+window.onload = () => {
+    canvas = document.getElementById('screen');
+    container = document.getElementById('ctrlContainer');
+    S.screenCtx = canvas.getContext('2d');
+    // If no access token, show password modal immediately instead of spinning
+    if (!localStorage.getItem('rcAccessToken')) {
+        document.getElementById('serverPassword').value = '';
+        document.getElementById('pwdError').style.display = 'none';
+        document.getElementById('passwordModal').classList.add('show');
+        setTimeout(() => document.getElementById('serverPassword').click(), 100);
+    } else {
+        S.accessToken = localStorage.getItem('rcAccessToken');
+        refreshMachines();
+    }
+    S.refreshTimer = setInterval(refreshMachines, 5000);
+};
+
+// ============ UI ============
+function showToast(msg, type = 'info') {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.className = `toast show ${type}`;
+    setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+function updateStatus(status, text) {
+    document.getElementById('statusBadge').className = `status-badge ${status}`;
+    document.getElementById('statusText').textContent = text;
+}
+
+// ============ Machine Grid ============
+function showMachineGrid() {
+    if (S.connected) {
+        if (confirm('确定断开当前连接?')) disconnect();
+        return;
+    }
+    refreshMachines();
+}
+
+function showPasswordModal() {
+    document.getElementById('serverPassword').value = '';
+    document.getElementById('pwdError').style.display = 'none';
+    document.getElementById('passwordModal').classList.add('show');
+    setTimeout(() => document.getElementById('serverPassword').click(), 100);
+}
+
+function refreshMachines() {
+    // Skip refresh while password modal is open
+    var modal = document.getElementById('passwordModal');
+    if (modal && modal.classList.contains('show')) return;
+
+    fetch('/api/agents').then(r => {
+        if (r.status === 401) {
+            // Not logged in - show password modal
+            document.getElementById('loadingState').style.display = 'none';
+            document.getElementById('emptyState').style.display = 'none';
+            document.getElementById('serverPassword').value = '';
+            document.getElementById('pwdError').style.display = 'none';
+            document.getElementById('passwordModal').classList.add('show');
+            setTimeout(() => document.getElementById('serverPassword').click(), 100);
+            return null;
+        }
+        return r.json();
+    }).then(data => {
+        if (!data) return;  // 401 case already handled above
+        S.machines = data.agents || [];
+        renderMachineGrid();
+    }).catch(() => {
+        document.getElementById('loadingState').style.display = 'none';
+        document.getElementById('errorState').style.display = 'block';
+    });
+}
+
+function renderMachineGrid() {
+    const grid = document.getElementById('machineGrid');
+    const loading = document.getElementById('loadingState');
+    const empty = document.getElementById('emptyState');
+    const error = document.getElementById('errorState');
+    const count = document.getElementById('machineCount');
+
+    loading.style.display = 'none';
+    error.style.display = 'none';
+    count.textContent = `(${S.machines.length})`;
+
+    if (S.machines.length === 0) {
+        grid.style.display = 'none';
+        empty.style.display = 'block';
+        return;
+    }
+
+    empty.style.display = 'none';
+    grid.style.display = 'grid';
+    grid.innerHTML = S.machines.map(a => `
+        <div class="machine-card" onclick="requestConnect('${a.agentId}', '${(a.hostname||'Unknown').replace(/'/g,'"')}')">
+            <div class="icon">🖥️</div>
+            <div class="name">${a.hostname || 'Unknown'}</div>
+            <div class="meta">${a.os || 'Windows'}</div>
+            <div class="status ${a.online?'online':'offline'}">${a.online?'🟢 在线':'⚫ 离线'}</div>
+        </div>
+    `).join('');
+}
+
+function requestConnect(agentId, hostname) {
+    S.pendingMachineId = agentId;
+    document.getElementById('pwdMachineName').textContent = hostname;
+    document.getElementById('serverPassword').value = '';
+    document.getElementById('pwdError').style.display = 'none';
+    document.getElementById('passwordModal').classList.add('show');
+    setTimeout(() => document.getElementById('serverPassword').click(), 100);
+}
+
+function hidePasswordModal() {
+    document.getElementById('passwordModal').classList.remove('show');
+    S.pendingMachineId = null;
+}
+
+function handlePwdKeydown(e) {
+    if (e.key === 'Enter') submitPassword();
+}
+
+function submitPassword() {
+    const pw = document.getElementById('serverPassword').value;
+    if (!pw) return;
+
+    updateStatus('connecting', '验证密码...');
+    fetch('/api/agents', {
+        headers: { 'Authorization': 'Bearer ' + btoa(pw) }
+    }).then(r => {
+        if (!r.ok) throw new Error('invalid');
+        return r.json();
+    }).then(data => {
+        S.accessToken = pw;
+        S.machines = data.agents || [];
+        var pwdField = document.getElementById('serverPassword');
+        var listDiv = document.getElementById('pwdMachineList') || document.createElement('div');
+        listDiv.id = 'pwdMachineList';
+        listDiv.style.cssText = 'max-height:250px;overflow-y:auto;margin:10px 0;';
+        if (S.machines.length === 0) {
+            listDiv.innerHTML = '<div style="color:#888;text-align:center;padding:20px;">没有在线主机</div>';
+        } else {
+            listDiv.innerHTML = '';
+            S.machines.forEach(function(a) {
+                var div = document.createElement('div');
+                div.style.cssText = 'padding:10px 12px;cursor:pointer;border-radius:6px;margin-bottom:4px;background:#2a2a2a;color:#e0e0e0;';
+                div.innerHTML = '<div style="font-weight:500">' + (a.hostname||'Unknown') + '</div><div style="font-size:12px;color:#888">' + (a.os||'Windows') + '</div>';
+                div.onclick = function() {
+                    if (!a.online) { alert('该主机当前不在线'); return; }
+                    S.pendingMachineId = a.agentId;
+                    hidePasswordModal();
+                    doConnect(a.agentId);
+                };
+                listDiv.appendChild(div);
+            });
+        }
+        pwdField.style.display = 'none';
+        if (!document.getElementById('pwdMachineList')) pwdField.parentNode.insertBefore(listDiv, pwdField.nextSibling);
+        updateStatus('online', '已连接');
+    }).catch(() => {
+        document.getElementById('pwdError').textContent = '❌ 密码错误';
+        document.getElementById('pwdError').style.display = 'block';
+        updateStatus('offline', '未连接');
+    });
+}
+
+function doConnect(agentId) {
+    if (S.ws) { S.ws.close(); S.ws = null; }
+    clearInterval(S.refreshTimer);
+
+    updateStatus('connecting', '连接中...');
+    S.agentId = agentId;
+    document.getElementById('agentIdDisplay').textContent = agentId;
+
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${location.host}/client`);
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({type:'auth', password:S.accessToken, agentId:agentId}));
+    };
+
+    ws.onmessage = evt => handleMsg(JSON.parse(evt.data));
+    ws.onclose = () => { if (S.connected) { showToast('连接已断开', 'error'); disconnect(); }};
+    ws.onerror = () => { showToast('连接失败', 'error'); updateStatus('offline', '连接失败'); };
+
+    S.ws = ws;
+}
+
+function disconnect() {
+    if (S.ws) { S.ws.close(); S.ws = null; }
+    S.connected = false;
+    document.getElementById('machineView').style.display = 'flex';
+    document.getElementById('controlView').style.display = 'none';
+    document.getElementById('btnConnect').style.display = 'flex';
+    document.getElementById('btnDisconnect').style.display = 'none';
+    updateStatus('offline', '未连接');
+    document.getElementById('agentIdDisplay').textContent = '';
+    S.refreshTimer = setInterval(refreshMachines, 5000);
+    refreshMachines();
+}
+
+function handleMsg(msg) {
+    switch(msg.type) {
+        case 'auth_ok':
+            S.connected = true;
+            document.getElementById('machineView').style.display = 'none';
+            document.getElementById('controlView').style.display = 'flex';
+            canvas.style.display = 'block';
+            updateStatus('online', '已连接');
+            document.getElementById('btnConnect').style.display = 'none';
+            document.getElementById('btnDisconnect').style.display = 'flex';
+            if (msg.agentInfo) {
+                document.getElementById('infoHostname').textContent = msg.agentInfo.hostname || '-';
+                document.getElementById('infoOS').textContent = msg.agentInfo.os || '-';
+            }
+            ['zoomControls','quickActions','tabBar'].forEach(id => document.getElementById(id).style.display = 'flex');
+            addTerm('已连接到 ' + (msg.agentInfo?.hostname||'主机'), 'info');
+            showToast('连接成功', 'success');
+            break;
+        case 'auth_failed': showToast(msg.message||'认证失败', 'error'); disconnect(); break;
+        case 'agent_offline': showToast('主机已离线', 'error'); disconnect(); break;
+        case 'screen':
+            if (msg.fmt === 'kf') renderKeyframe(msg.data, msg.w, msg.h);
+            else if (msg.fmt === 'df') renderDeltaFrame(msg);
+            else if (msg.data) renderKeyframe(msg.data);  // legacy format
+            break;
+        case 'output': handleOutput(msg); break;
+        case 'file_chunk': handleFileChunk(msg); break;
+    }
+}
+
+function send(data) { if (S.ws && S.ws.readyState === WebSocket.OPEN) S.ws.send(JSON.stringify(data)); }
+
+// ============ Screen ============
+function renderScreen(b64) {
+    renderKeyframe(b64);
+}
+
+function renderKeyframe(b64, w, h) {
+    if (!S.screenCtx) return;
+    const img = new Image();
+    img.onload = () => {
+        if (!w) w = img.width;
+        if (!h) h = img.height;
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        }
+        S.screenCtx.clearRect(0, 0, canvas.width, canvas.height);
+        S.screenCtx.drawImage(img, 0, 0);
+    };
+    img.src = 'data:image/jpeg;base64,' + b64;
+}
+
+function renderDeltaFrame(msg) {
+    if (!S.screenCtx) return;
+    try {
+        const binaryStr = atob(msg.data);
+        const len = binaryStr.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = binaryStr.charCodeAt(i);
+        
+        const view = new DataView(bytes.buffer);
+        let offset = 0;
+        const regions = msg.regions || [];
+        
+        for (let i = 0; i < regions.length; i++) {
+            const [x, y, w, h] = regions[i];
+            if (offset + 4 > bytes.length) break;
+            const chunkSize = view.getUint32(offset, false);
+            offset += 4;
+            if (offset + chunkSize > bytes.length) break;
+            
+            const jpgBytes = bytes.slice(offset, offset + chunkSize);
+            // Safe base64 encoding (avoid String.fromCharCode.apply stack overflow)
+            let jpgBase64 = '';
+            const CHUNK = 8192;
+            for (let j = 0; j < jpgBytes.length; j += CHUNK) {
+                const chunk = Array.from ? Array.from(jpgBytes.slice(j, j + CHUNK)) : Array.prototype.slice.call(jpgBytes.slice(j, j + CHUNK));
+                jpgBase64 += btoa(String.fromCharCode.apply(null, chunk));
+            }
+            offset += chunkSize;
+            
+            const tmpImg = new Image();
+            tmpImg.onload = () => {
+                S.screenCtx.drawImage(tmpImg, x, y, w, h);
+            };
+            tmpImg.src = 'data:image/jpeg;base64,' + jpgBase64;
+        }
+    } catch(e) {
+        console.warn('Delta render error:', e);
+        ws.send(JSON.stringify({type:'req_kf'}));
+    }
+}
+
+// ============ Input Handling ============
+function getPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return {x: Math.round((e.clientX-r.left)/S.zoom), y: Math.round((e.clientY-r.top)/S.zoom)};
+}
+function getTouchPos(t) {
+    const r = canvas.getBoundingClientRect();
+    return {x: Math.round((t.clientX-r.left)/S.zoom), y: Math.round((t.clientY-r.top)/S.zoom)};
+}
+
+container.addEventListener('mousedown', e => { if(!S.connected)return; e.preventDefault(); const p=getPos(e); send({type:'mouse',action:'down',x:p.x,y:p.y,button:e.button===2?'right':'left'}); });
+container.addEventListener('mouseup', e => { if(!S.connected)return; const p=getPos(e); send({type:'mouse',action:'up',x:p.x,y:p.y,button:e.button===2?'right':'left'}); });
+container.addEventListener('mousemove', e => { if(!S.connected)return; const p=getPos(e); send({type:'mouse',action:'move',x:p.x,y:p.y}); });
+container.addEventListener('contextmenu', e => e.preventDefault());
+container.addEventListener('wheel', e => { if(!S.connected)return; e.preventDefault(); const p=getPos(e); send({type:'mouse',action:'wheel',x:p.x,y:p.y,deltaY:e.deltaY>0?1:-1}); },{passive:false});
+
+let lastTouch = null;
+container.addEventListener('touchstart', e => { if(!S.connected)return; e.preventDefault(); const p=getTouchPos(e.touches[0]); lastTouch=p; send({type:'mouse',action:'down',x:p.x,y:p.y,button:'left'}); },{passive:false});
+container.addEventListener('touchmove', e => { if(!S.connected)return; e.preventDefault(); const p=getTouchPos(e.touches[0]); send({type:'mouse',action:'move',x:p.x,y:p.y}); },{passive:false});
+container.addEventListener('touchend', e => { if(!S.connected||!lastTouch)return; e.preventDefault(); send({type:'mouse',action:'click',x:lastTouch.x,y:lastTouch.y,button:'left'}); lastTouch=null; },{passive:false});
+
+function sendHotkey(...keys) { if(!S.connected)return; keys.forEach(k => send({type:'key',action:'press',key:k})); showToast('已发送: ' + keys.join('+')); }
+
+// ============ Zoom ============
+function zoomIn() { S.zoom = Math.min(S.zoom + 0.25, 3); applyZoom(); }
+function zoomOut() { S.zoom = Math.max(S.zoom - 0.25, 0.25); applyZoom(); }
+function applyZoom() { canvas.style.transform = `scale(${S.zoom})`; document.getElementById('zoomLabel').textContent = Math.round(S.zoom * 100) + '%'; }
+
+// ============ Terminal ============
+function handleTerminalInput(e) {
+    if(e.key !== 'Enter') return;
+    const input = document.getElementById('terminalInput');
+    const cmd = input.value.trim();
+    if(!cmd) return;
+    input.value = '';
+    addTerm('$ ' + cmd, 'cmd');
+    if(!S.connected) { addTerm('未连接', 'error'); return; }
+    send({type:'exec',session:'exec_' + (++S.execCounter),cmd});
+}
+function handleOutput(msg) {
+    const out = document.getElementById('terminalOutput');
+    if(msg.data) addTerm(msg.data, 'output');
+    out.scrollTop = out.scrollHeight;
+}
+function addTerm(text, type='output') {
+    const out = document.getElementById('terminalOutput');
+    const d = document.createElement('div');
+    d.className = 'terminal-line ' + type;
+    d.textContent = text;
+    out.appendChild(d);
+    out.scrollTop = out.scrollHeight;
+}
+function switchTab(tab) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById('panel' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.add('active');
+}
+
+// ============ Quick Actions ============
+function lockScreen() { if(!S.connected)return; send({type:'exec',cmd:'rundll32.exe user32.dll,LockWorkStation'}); showToast('已发送锁屏命令'); }
+function blankScreen() { if(!S.connected)return; send({type:'exec',cmd:'powershell -c "Add-Type -Name WinAPI -Namespace Win -MemberDefinition \'[DllImport(\"user32.dll\")]public static extern int SendMessage(int hWnd,int Msg,short wParam,short lParam);\';[Win.WinAPI]::SendMessage(0xffff,0x0112,0xF170,2)"'}); showToast('已发送黑屏命令'); }
+function screenshot() { if(canvas.width===0)return; const l=document.createElement('a'); l.download=`screenshot-${Date.now()}.png`; l.href=canvas.toDataURL('image/png'); l.click(); showToast('截图已保存','success'); }
+
+// ============ File Transfer ============
+function doDownload() {
+    const path = document.getElementById('downloadPath').value.trim();
+    const filename = document.getElementById('downloadFilename').value.trim() || path.split('\\').pop().split('/').pop();
+    if(!path) return;
+    hideDownloadModal();
+    const sid = 'dl_' + Date.now();
+    S.pendingFiles.set(sid, {filename, chunks:[], received:0});
+    send({type:'file_request',session:sid,action:'download',path,filename});
+    showToast('开始下载: ' + filename);
+}
+function hideDownloadModal() { document.getElementById('downloadModal').classList.remove('show'); }
+function showDownloadModal() { document.getElementById('downloadModal').classList.add('show'); }
+function showUploadModal() { document.getElementById('uploadModal').classList.add('show'); }
+function hideUploadModal() { document.getElementById('uploadModal').classList.remove('show'); }
+
+function handleFileChunk(msg) {
+    if(!S.pendingFiles.has(msg.session)) return;
+    const pf = S.pendingFiles.get(msg.session);
+    if(msg.done) {
+        const b64 = pf.chunks.join('');
+        const bin = atob(b64);
+        const arr = new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+        const blob = new Blob([arr]);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href=url; a.download=msg.filename||pf.filename; a.click();
+        URL.revokeObjectURL(url);
+        S.pendingFiles.delete(msg.session);
+        showToast('下载完成: ' + (msg.filename||pf.filename), 'success');
+    } else {
+        pf.chunks.push(msg.chunk);
+    }
+}
+
+function doUpload() {
+    const fileInput = document.getElementById('uploadFileInput');
+    const path = document.getElementById('uploadPath').value.trim();
+    if(!fileInput.files.length) { showToast('请选择文件','error'); return; }
+    const file = fileInput.files[0];
+    const targetPath = path ? (path.endsWith('\\')||path.endsWith('/')?path:path+'\\') + file.name : file.name;
+    hideUploadModal();
+    showToast('上传中: ' + file.name);
+    const reader = new FileReader();
+    reader.onload = e => {
+        const b64 = e.target.result.split(',')[1];
+        const CHUNK = 32768;
+        let offset = 0;
+        const totalChunks = Math.ceil(b64.length / CHUNK);
+        function sendChunk() {
+            const end = Math.min(offset + CHUNK, b64.length);
+            const chunk = b64.slice(offset, end);
+            const sid = 'ul_' + Date.now() + '_' + offset;
+            send({type:'file_request',session:sid,action:'upload',path:targetPath,filename:file.name,chunk,isLast:end>=b64.length,chunkIdx:Math.floor(offset/CHUNK),totalChunks});
+            offset = end;
+            if(offset < b64.length) setTimeout(sendChunk, 50);
+            else showToast('上传完成: ' + file.name, 'success');
+        }
+        sendChunk();
+    };
+    reader.readAsDataURL(file);
+}
+</script>
+</body>
+</html>

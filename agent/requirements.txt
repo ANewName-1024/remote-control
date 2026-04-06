@@ -1,0 +1,10 @@
+# Core dependencies for RemoteControlAgent
+websocket-client>=1.0
+mss>=9.0
+Pillow>=9.0
+pyautogui>=0.9.54
+pywin32>=300
+psutil>=5.0
+
+# PyInstaller (for building .exe)
+pyinstaller>=6.0
