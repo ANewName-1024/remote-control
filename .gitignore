@@ -7,3 +7,7 @@ build/
 *.log
 node_modules/
 .DS_Store
+
+# Runtime deploy artifacts
+server/static/app/
+server/uploads/

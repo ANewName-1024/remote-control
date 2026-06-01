@@ -42,6 +42,92 @@ const server = http.createServer(app);
 
 // Serve static files (web control interface)
 app.use(express.static(path.join(__dirname, 'static')));
+
+// === Static Deploy API ===
+const DEPLOY_DIR = path.join(__dirname, 'static', 'app');
+const DEPLOY_MAX_BYTES = 50 * 1024 * 1024; // 50MB per file
+if (!fs.existsSync(DEPLOY_DIR)) {
+    fs.mkdirSync(DEPLOY_DIR, { recursive: true });
+}
+
+// Auth helper for deploy endpoints: require base64(password) == ACCESS_PASSWORD
+function requireDeployAuth(req, res, next) {
+    const auth = req.headers['authorization'] || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    let password = '';
+    try { password = Buffer.from(token, 'base64').toString('utf8'); } catch {}
+    if (password !== ACCESS_PASSWORD) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    next();
+}
+
+// Resolve a user-supplied deploy path safely inside DEPLOY_DIR.
+// Returns the absolute path or null if the path tries to escape.
+function resolveSafeDeployPath(filepath) {
+    if (typeof filepath !== 'string' || filepath.length === 0) return null;
+    // Reject NUL bytes and absolute paths outright.
+    if (filepath.includes('\0') || path.isAbsolute(filepath)) return null;
+    const resolved = path.resolve(DEPLOY_DIR, filepath);
+    // Ensure resolved path is inside DEPLOY_DIR (with trailing separator to avoid prefix trickery).
+    const rootWithSep = DEPLOY_DIR.endsWith(path.sep) ? DEPLOY_DIR : DEPLOY_DIR + path.sep;
+    if (resolved !== DEPLOY_DIR && !resolved.startsWith(rootWithSep)) return null;
+    return resolved;
+}
+
+// PUT /api/deploy/:filepath(*) - Deploy static file to static/app/
+app.put('/api/deploy/:filepath(*)', requireDeployAuth, express.raw({
+    type: () => true,
+    limit: DEPLOY_MAX_BYTES
+}), async (req, res) => {
+    const safePath = resolveSafeDeployPath(req.params.filepath);
+    if (!safePath) {
+        return res.status(403).json({ error: 'Invalid path' });
+    }
+    try {
+        await fs.promises.mkdir(path.dirname(safePath), { recursive: true });
+        await fs.promises.writeFile(safePath, req.body || Buffer.alloc(0));
+        res.json({ success: true, path: `/app/${req.params.filepath}` });
+    } catch (err) {
+        console.error('[Deploy] write failed:', err);
+        res.status(500).json({ error: 'Upload failed' });
+    }
+});
+
+// Serve deployed app at /app/
+app.use('/app', express.static(DEPLOY_DIR));
+
+// GET /api/deploy/list - List deployed files (iterative, async, capped depth)
+app.get('/api/deploy/list', requireDeployAuth, async (req, res) => {
+    const MAX_DEPTH = 8;
+    const files = [];
+    try {
+        // Iterative BFS walk to avoid stack overflow on deep trees.
+        const queue = [{ dir: DEPLOY_DIR, rel: '', depth: 0 }];
+        while (queue.length > 0) {
+            const { dir, rel, depth } = queue.shift();
+            if (depth > MAX_DEPTH) continue;
+            let entries;
+            try {
+                entries = await fs.promises.readdir(dir, { withFileTypes: true });
+            } catch (err) {
+                continue; // skip unreadable subdirs
+            }
+            for (const entry of entries) {
+                const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+                if (entry.isDirectory()) {
+                    queue.push({ dir: path.join(dir, entry.name), rel: childRel, depth: depth + 1 });
+                } else if (entry.isFile()) {
+                    files.push(childRel);
+                }
+            }
+        }
+        res.json({ files });
+    } catch (err) {
+        console.error('[Deploy] list failed:', err);
+        res.status(500).json({ error: 'List failed' });
+    }
+});
 app.use(express.json());
 
 // ============================================================
