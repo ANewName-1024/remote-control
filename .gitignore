@@ -11,3 +11,6 @@ node_modules/
 # Runtime deploy artifacts
 server/static/app/
 server/uploads/
+
+# Backup of previously corrupted AGENT.md (kept for diff reference)
+AGENT.md.old

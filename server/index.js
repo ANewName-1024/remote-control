@@ -239,9 +239,23 @@ app.get('/api/files', (req, res) => {
 });
 
 // File upload configuration
+// Sanitize the original name to strip path separators/parent refs so the
+// stored filename can't smuggle "../" segments (defense in depth — the file
+// is already confined to UPLOAD_DIR, but downstream consumers of the name
+// should not see traversal sequences).
+function sanitizeFilename(name) {
+    if (typeof name !== 'string') return 'file';
+    // Strip NUL bytes and control chars FIRST so path.basename doesn't choke
+    // (Windows path APIs reject NUL bytes in filenames).
+    const cleaned = name.replace(/[\x00-\x1f]/g, '');
+    // Then strip any path components.
+    const base = path.basename(cleaned);
+    return base.length > 0 ? base : 'file';
+}
+
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${sanitizeFilename(file.originalname)}`)
 });
 const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } }); // 500MB max
 
