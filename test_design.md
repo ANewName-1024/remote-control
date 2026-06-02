@@ -166,10 +166,10 @@ remote-control/
 | test_path_security.js | 12 | 16 | < 2s |
 | test_http_api.js | 21 | 29 | < 3s |
 | test_ws_protocol.js | 11 | 14 | < 3s |
-| test_e2e_flow.js | 8 | 14 | < 4s |
+| test_e2e_flow.js | 8 | 21 | < 4s |
 | test_delta_encoder.py | 10 | 12 | < 2s |
-| test_mouse_keyboard.py | 30 | 36 | < 5s |
-| **合计** | **119** | **148** | **< 25s** |
+| test_mouse_keyboard.py | 30 | 42（含 U1-U6） | < 5s |
+| **合计** | **119** | **161** | **< 25s** |
 
 ---
 

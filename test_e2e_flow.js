@@ -188,6 +188,26 @@ function waitFor(messages, predicate, timeoutMs = 2000) {
               chunk2.session === dlSid && chunk2.chunk === 'aGVsbG8=' && !chunk2.done,
               JSON.stringify(chunk2));
 
+        // ---------- T10: Client → file_request upload → Agent (D16 e2e) ----------
+        console.log('\n[T10] Client file_request upload → Agent (server forwarding)');
+        const ulSid = 'ul_test_' + Date.now();
+        clientWs.send(JSON.stringify({
+            type: 'file_request', action: 'upload',
+            session: ulSid,
+            path: 'C:/Users/test/upload.txt', filename: 'upload.txt',
+            chunk: 'aGVsbG8gdXBsb2Fk', chunkIdx: 0, isLast: true, totalChunks: 1
+        }));
+        const upl = await waitFor(agentMsgs,
+            m => m.type === 'file_request' && m.action === 'upload' && m.session === ulSid, 2000);
+        check('agent receives file_request:upload', upl.action === 'upload', JSON.stringify(upl));
+        check('agent receives upload with same sessionId (preserved by server)',
+              upl.session === ulSid, `expected ${ulSid}, got ${upl.session}`);
+        check('agent receives upload chunk data', upl.chunk === 'aGVsbG8gdXBsb2Fk');
+        check('agent receives upload chunkIdx=0 + isLast=true',
+              upl.chunkIdx === 0 && upl.isLast === true);
+        check('agent receives upload path + filename',
+              upl.path === 'C:/Users/test/upload.txt' && upl.filename === 'upload.txt');
+
         agentWs.close();
         clientWs.close();
 
