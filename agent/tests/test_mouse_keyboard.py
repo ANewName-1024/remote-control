@@ -352,6 +352,7 @@ class TestOnMessageDispatch(unittest.TestCase):
         self._mouse_p.stop()
         self._key_p.stop()
         self._download_p.stop()
+        self._upload_p.stop()
         self._thread_p.stop()
         self._clipboard_p.stop()
 
