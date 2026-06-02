@@ -14,3 +14,9 @@ server/uploads/
 
 # Backup of previously corrupted AGENT.md (kept for diff reference)
 AGENT.md.old
+
+# Deploy artifacts (real config + generated tarballs)
+deploy/.env.vps
+deploy/.env.windows
+deploy/dist/
+deploy/tools/

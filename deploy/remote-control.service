@@ -1,0 +1,37 @@
+[Unit]
+Description=Remote-Control Node.js relay (server/index.js)
+Documentation=https://github.com/ANewName-1024/remote-control
+After=network-online.target
+Wants=network-online.target
+# StartLimit* lives in [Unit] on systemd 239, not [Service]
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/remote-control/server
+EnvironmentFile=/opt/remote-control/server/.env
+ExecStart=/usr/bin/node /opt/remote-control/server/index.js
+Restart=always
+RestartSec=5
+
+# Sandbox / hardening. ReadWritePaths covers the *whole* server tree because
+# server/index.js creates `static/app/` on startup (in addition to the
+# uploads/ dir used by the file_request handler). Keep this broad enough.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/remote-control/server
+# Allow port bind for non-root (we run as root on this VPS, but keep safe)
+AmbientCapabilities=
+CapabilityBoundingSet=
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=remote-control
+
+[Install]
+WantedBy=multi-user.target
+
