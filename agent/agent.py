@@ -396,6 +396,141 @@ def handle_file_download(path, session_id, filename, send_fn):
         logging.error(f"Download error: {e}")
         send_fn({'type': 'output', 'session': session_id, 'data': f'Download error: {e}', 'done': True})
 
+
+# In-progress upload sessions: key = (filename, targetPath) -> {
+#   'fh': file handle, 'written': bytes written, 'target': abs path,
+#   'chunkIdx': last seen index (for out-of-order detection)
+# }
+# Multiple chunks from the same upload share the same key (the web client
+# generates a fresh session id per chunk, so we key by file identity).
+UPLOAD_SESSIONS = {}
+UPLOAD_MAX_BYTES = 500 * 1024 * 1024  # 500MB per file (matches multer limit)
+UPLOAD_ROOT = os.path.join(os.environ.get('APPDATA', '.'), APP_NAME, 'uploads')
+
+
+def _is_safe_upload_target(target_path):
+    """Validate upload target path.
+
+    Rules:
+    - Must be a string
+    - Must be a relative path (not absolute, no drive letter)
+    - Must not contain '..' components (no path traversal)
+    - Resolved absolute path must be inside UPLOAD_ROOT
+    - Parent directory must already exist (don't auto-create deep trees)
+    """
+    if not isinstance(target_path, str) or not target_path:
+        return None
+    if os.path.isabs(target_path):
+        return None
+    # Normalize separators
+    norm = target_path.replace('\\', '/')
+    parts = [p for p in norm.split('/') if p not in ('', '.')]
+    if any(p == '..' for p in parts):
+        return None
+    safe_abs = os.path.abspath(os.path.join(UPLOAD_ROOT, *parts))
+    root_abs = os.path.abspath(UPLOAD_ROOT)
+    if not (safe_abs == root_abs or safe_abs.startswith(root_abs + os.sep)):
+        return None
+    return safe_abs
+
+
+def handle_file_upload(msg, send_fn):
+    """Handle file_request:upload (chunked) from server.
+
+    Message shape (from web client doUpload):
+      { type: 'file_request', action: 'upload', session, path, filename,
+        chunk (base64), chunkIdx, totalChunks, isLast }
+    """
+    try:
+        filename = msg.get('filename') or 'upload.bin'
+        target_rel = msg.get('path') or filename
+        chunk_b64 = msg.get('chunk', '')
+        chunk_idx = int(msg.get('chunkIdx', 0))
+        is_last = bool(msg.get('isLast', False))
+
+        target_abs = _is_safe_upload_target(target_rel)
+        if not target_abs:
+            logging.warning(f"Upload rejected (unsafe path): {target_rel}")
+            send_fn({
+                'type': 'file_request_result',
+                'action': 'upload',
+                'filename': filename,
+                'ok': False,
+                'error': f'Unsafe target path: {target_rel}'
+            })
+            return
+
+        # Lazily create the uploads root.
+        os.makedirs(os.path.dirname(target_abs), exist_ok=True)
+
+        key = (filename, target_abs)
+        sess = UPLOAD_SESSIONS.get(key)
+
+        # First chunk of a new upload: open a fresh file in append-binary mode.
+        if sess is None:
+            if chunk_idx != 0:
+                # Out-of-order arrival: first thing we see is not chunk 0.
+                # Skip silently (could be a duplicate / retry).
+                logging.debug(f"Upload: skipping chunkIdx={chunk_idx} for {filename} (no session)")
+                return
+            sess = {
+                'fh': open(target_abs, 'ab'),
+                'written': 0,
+                'target': target_abs,
+                'last_idx': -1,
+            }
+            UPLOAD_SESSIONS[key] = sess
+            logging.info(f"Upload start: {filename} -> {target_abs}")
+
+        # Decode + write the chunk.
+        try:
+            raw = base64.b64decode(chunk_b64) if chunk_b64 else b''
+        except Exception as e:
+            logging.error(f"Upload base64 decode error: {e}")
+            raw = b''
+
+        if raw:
+            if sess['written'] + len(raw) > UPLOAD_MAX_BYTES:
+                # Refuse to exceed the cap; close + drop session.
+                logging.warning(f"Upload aborted: exceeds {UPLOAD_MAX_BYTES} bytes")
+                try: sess['fh'].close()
+                except Exception: pass
+                UPLOAD_SESSIONS.pop(key, None)
+                send_fn({
+                    'type': 'file_request_result',
+                    'action': 'upload',
+                    'filename': filename,
+                    'ok': False,
+                    'error': f'File too large (>{UPLOAD_MAX_BYTES} bytes)'
+                })
+                return
+            sess['fh'].write(raw)
+            sess['written'] += len(raw)
+            sess['last_idx'] = chunk_idx
+
+        if is_last:
+            try: sess['fh'].close()
+            except Exception: pass
+            UPLOAD_SESSIONS.pop(key, None)
+            logging.info(f"Upload done: {filename} ({sess['written']} bytes)")
+            send_fn({
+                'type': 'file_request_result',
+                'action': 'upload',
+                'filename': filename,
+                'ok': True,
+                'path': target_abs,
+                'bytes': sess['written']
+            })
+    except Exception as e:
+        logging.error(f"Upload error: {e}")
+        send_fn({
+            'type': 'file_request_result',
+            'action': 'upload',
+            'filename': msg.get('filename', ''),
+            'ok': False,
+            'error': str(e)
+        })
+
 # ============================================================
 # WebSocket Client
 # ============================================================
@@ -929,6 +1064,9 @@ class RemoteControlApp:
                 path = msg.get('path', '')
                 filename = msg.get('filename', '')
                 threading.Thread(target=handle_file_download, args=(path, session, filename, self.ws_client.send), daemon=True).start()
+            elif action == 'upload':
+                # Chunked upload: handled inline (stateful across chunks).
+                handle_file_upload(msg, self.ws_client.send)
     
     def _start_screen_stream(self):
         if self.stream_running:

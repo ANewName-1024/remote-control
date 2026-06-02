@@ -200,9 +200,10 @@ process.env.ACCESS_PASSWORD = PASSWORD;
 
 | 编号 | 说明 | 影响 |
 |------|------|------|
-| GAP-1 | Agent 未处理 `file_request:upload` 消息 | 客户端 `index.html` 发送的 upload 消息会被 agent 静默忽略；实际上传走 `/api/upload` HTTP 通道工作。**功能未真正缺失，但协议有死代码**。 |
-| GAP-2 | `_on_message` 没有 `clipboard` 分支 | server 转发 `clipboard` 消息到 agent，agent 不处理。需确认 SPEC 是否要支持。 |
-| GAP-3 | `multer` 500MB 上限与 Deploy 50MB 上限不一致 | 文档化差异，非 bug |
+| ~~GAP-1~~ | **已修复**：Agent 已实现 `file_request:upload`（`handle_file_upload`） | 客户端 `index.html doUpload` 的 chunked upload 协议现在真正能落地。新增 `agent/tests/test_mouse_keyboard.py` 下的 6 个 `TestHandleFileUpload` 用例 + 1 个 dispatch 用例。 |
+| ~~GAP-2~~ | **已修复**：Server 为 `file_request` 也创建 server session | Agent 用 client 传来的 sessionId 发回 `file_chunk`，server 现在能正确路由回 client。原 e2e T07 必须复用 exec session 绕过此问题；修复后新增 T09 用 file_request 自己的 session 验证 file_chunk 路由。 |
+| GAP-3 | `_on_message` 没有 `clipboard` 分支 | server 转发 `clipboard` 消息到 agent，agent 不处理。需确认 SPEC 是否要支持。 |
+| GAP-4 | `multer` 500MB 上限与 Deploy 50MB 上限不一致 | 文档化差异，非 bug |
 
 ---
 

@@ -161,6 +161,33 @@ function waitFor(messages, predicate, timeoutMs = 2000) {
         check('agent receives clipboard (forwarded by server, even if agent ignores it)',
               clip.action === 'set' && clip.content === 'test', JSON.stringify(clip));
 
+        // ---------- T09: GAP-2 fix — file_request own session routing ----------
+        console.log('\n[T09] file_request own session routes file_chunk back (GAP-2 fix)');
+        // Client generates its own session id (like the real web client doDownload).
+        const dlSid = 'dl_test_' + Date.now();
+        clientWs.send(JSON.stringify({
+            type: 'file_request', action: 'download',
+            session: dlSid,
+            path: 'C:/Users/test/file.txt', filename: 'file.txt'
+        }));
+        // Agent should receive the file_request WITH the same session id preserved.
+        const fdl2 = await waitFor(agentMsgs,
+            m => m.type === 'file_request' && m.action === 'download' && m.session === dlSid, 2000);
+        check('agent receives file_request:download with client session id',
+              fdl2.session === dlSid, JSON.stringify(fdl2));
+        // Now agent sends back file_chunk using that same session id.
+        // Server should route it back to the originating client (GAP-2 was: server
+        // had no record of this session and dropped the chunk).
+        agentWs.send(JSON.stringify({
+            type: 'file_chunk', session: dlSid,
+            chunk: 'aGVsbG8=', done: false, filename: 'file.txt'
+        }));
+        const chunk2 = await waitFor(clientMsgs,
+            m => m.type === 'file_chunk' && m.session === dlSid, 2000);
+        check('client receives file_chunk via own file_request session (GAP-2 fix)',
+              chunk2.session === dlSid && chunk2.chunk === 'aGVsbG8=' && !chunk2.done,
+              JSON.stringify(chunk2));
+
         agentWs.close();
         clientWs.close();
 

@@ -522,11 +522,25 @@ wss.on('connection', (ws, req) => {
                 if (['mouse', 'key', 'exec', 'file_request', 'clipboard'].includes(msg.type)) {
                     const targetAgent = AGENTS.get(client.agentId);
                     if (targetAgent && targetAgent.ws.readyState === 1) {
-                        // Create session for commands
+                        // Create session for commands that need a server-side session
+                        // so the agent's subsequent file_chunk/output can be routed back.
+                        // - exec: server generates sessionId (cmd → output)
+                        // - file_request: reuse client-provided sessionId (file_request → file_chunk)
+                        //   The client (index.html doDownload) already generates
+                        //   'dl_' + Date.now() as the session id, so we can keep it.
                         if (msg.type === 'exec' && msg.cmd) {
                             const sessionId = uuidv4();
                             SESSIONS.set(sessionId, { agentId: client.agentId, clientId, type: 'exec' });
                             targetAgent.ws.send(JSON.stringify({ ...msg, session: sessionId }));
+                        } else if (msg.type === 'file_request' && msg.session) {
+                            // Register the client-supplied sessionId so file_chunk
+                            // (sent later by the agent) can be routed back to this client.
+                            SESSIONS.set(msg.session, {
+                                agentId: client.agentId,
+                                clientId,
+                                type: 'file_request'
+                            });
+                            targetAgent.ws.send(JSON.stringify(msg));
                         } else {
                             targetAgent.ws.send(JSON.stringify(msg));
                         }

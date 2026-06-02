@@ -338,10 +338,12 @@ class TestOnMessageDispatch(unittest.TestCase):
         self._mouse_p = patch.object(self.agent, 'handle_mouse')
         self._key_p = patch.object(self.agent, 'handle_key')
         self._download_p = patch.object(self.agent, 'handle_file_download')
+        self._upload_p = patch.object(self.agent, 'handle_file_upload')
         self._thread_p = patch.object(self.agent.threading, 'Thread')
         self._mouse = self._mouse_p.start()
         self._key = self._key_p.start()
         self._download = self._download_p.start()
+        self._upload = self._upload_p.start()
         self._thread = self._thread_p.start()
 
     def tearDown(self):
@@ -377,14 +379,20 @@ class TestOnMessageDispatch(unittest.TestCase):
                          f"thread target should be handle_file_download, got {kwargs}")
 
     def test_D16_file_request_upload_ignored(self):
-        """D16: GAP-1 — agent does not implement file_request:upload. Verify it's silently dropped."""
+        """D16: GAP-1 fix — agent now handles file_request:upload via handle_file_upload (inline, not thread)."""
         self.app._on_message({
             'type': 'file_request', 'action': 'upload',
-            'path': 'C:/x', 'filename': 'x', 'session': 's1'
+            'path': 'docs/x.txt', 'filename': 'x.txt', 'session': 's1',
+            'chunk': 'aGVsbG8=', 'chunkIdx': 0, 'isLast': True
         })
-        # No thread should be spawned
+        # Upload is stateful across chunks, so it runs inline (no thread).
         self._thread.assert_not_called()
-        # No error raised — just no-op
+        # But handle_file_upload is called with the full message.
+        self._upload.assert_called_once()
+        call_msg = self._upload.call_args.args[0]
+        self.assertEqual(call_msg['action'], 'upload')
+        self.assertEqual(call_msg['filename'], 'x.txt')
+        self.assertEqual(call_msg['chunk'], 'aGVsbG8=')
 
     def test_unknown_type_ignored(self):
         """Unknown message types don't crash _on_message."""
@@ -455,6 +463,158 @@ class TestCredentialsPersistence(unittest.TestCase):
         aid2, sec2, _ = self.agent.get_or_create_credentials()
         self.assertEqual(aid1, aid2, "agent_id should be stable across calls")
         self.assertEqual(sec1, sec2, "secret should be stable across calls")
+
+
+class TestHandleFileUpload(unittest.TestCase):
+    """GAP-1 fix: handle_file_upload — chunked file upload from web client.
+
+    Covers:
+    - U1: single-chunk upload (chunkIdx=0, isLast=True)
+    - U2: multi-chunk upload appends in order
+    - U3: unsafe path (..) is rejected, no file written
+    - U4: absolute path (C:\\...) is rejected
+    - U5: out-of-order first chunk (no chunkIdx=0) is skipped
+    - U6: result callback includes ok=True on success / ok=False on rejection
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent, _ = try_import_agent()
+
+    def setUp(self):
+        # Sandbox the upload root so we don't touch the real APPDATA.
+        self.tmp_root = tempfile.mkdtemp(prefix='rc-upload-')
+        self._root_p = patch.object(self.agent, 'UPLOAD_ROOT', self.tmp_root)
+        self._root_p.start()
+        # Clear in-progress upload sessions between tests.
+        self.agent.UPLOAD_SESSIONS.clear()
+        self.sent = []
+
+    def tearDown(self):
+        self._root_p.stop()
+        import shutil
+        shutil.rmtree(self.tmp_root, ignore_errors=True)
+
+    def _msg(self, filename, target_rel, b64, chunk_idx, is_last, total=None):
+        m = {
+            'type': 'file_request', 'action': 'upload',
+            'session': f'ul_{chunk_idx}',
+            'path': target_rel, 'filename': filename,
+            'chunk': b64, 'chunkIdx': chunk_idx, 'isLast': is_last,
+        }
+        if total is not None:
+            m['totalChunks'] = total
+        return m
+
+    def test_U1_single_chunk_upload(self):
+        """U1: one-shot upload writes the file and emits ok=True result."""
+        payload = base64.b64encode(b'hello world').decode('ascii')
+        self.agent.handle_file_upload(
+            self._msg('hi.txt', 'hi.txt', payload, 0, True),
+            lambda m: self.sent.append(m)
+        )
+        target = os.path.join(self.tmp_root, 'hi.txt')
+        self.assertTrue(os.path.isfile(target), f"file should be written at {target}")
+        with open(target, 'rb') as f:
+            self.assertEqual(f.read(), b'hello world')
+        # Result callback
+        results = [m for m in self.sent if m.get('type') == 'file_request_result']
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['bytes'], len(b'hello world'))
+        # Session cleaned up
+        self.assertEqual(self.agent.UPLOAD_SESSIONS, {})
+
+    def test_U2_multi_chunk_appends_in_order(self):
+        """U2: chunks with different chunkIdx append to the same file in order."""
+        chunks = [b'AAA', b'BBB', b'CCC']
+        for i, c in enumerate(chunks):
+            self.agent.handle_file_upload(
+                self._msg('big.bin', 'sub/big.bin', base64.b64encode(c).decode('ascii'), i, i == len(chunks) - 1, total=len(chunks)),
+                lambda m: self.sent.append(m)
+            )
+        target = os.path.join(self.tmp_root, 'sub', 'big.bin')
+        self.assertTrue(os.path.isfile(target), f"file should be written at {target}")
+        with open(target, 'rb') as f:
+            self.assertEqual(f.read(), b'AAABBBCCC')
+        # One result emitted (only on the isLast chunk)
+        results = [m for m in self.sent if m.get('type') == 'file_request_result']
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['bytes'], 9)
+
+    def test_U3_unsafe_traversal_rejected(self):
+        """U3: '..' in target path is rejected, no file written."""
+        # Sandbox escape attempt: write outside tmp_root
+        outside = os.path.join(self.tmp_root, '..', 'evil.txt')
+        # Normalize: '..' should map under tmp_root (or get rejected)
+        # Either way, the file should NOT end up outside tmp_root.
+        # The validator rejects '..' outright, so the file shouldn't be written anywhere.
+        self.agent.handle_file_upload(
+            self._msg('evil.txt', '../evil.txt', base64.b64encode(b'pwned').decode('ascii'), 0, True),
+            lambda m: self.sent.append(m)
+        )
+        # No file should be written inside the sandbox either.
+        self.assertFalse(os.path.exists(outside), f"file should not be written outside sandbox: {outside}")
+        # Result should be ok=False
+        results = [m for m in self.sent if m.get('type') == 'file_request_result']
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]['ok'])
+        self.assertIn('Unsafe', results[0].get('error', ''))
+
+    def test_U4_absolute_path_rejected(self):
+        """U4: absolute path (C:\\foo) is rejected, no file written."""
+        self.agent.handle_file_upload(
+            self._msg('foo.txt', 'C:/Windows/System32/drivers/etc/foo.txt',
+                      base64.b64encode(b'pwned').decode('ascii'), 0, True),
+            lambda m: self.sent.append(m)
+        )
+        results = [m for m in self.sent if m.get('type') == 'file_request_result']
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]['ok'])
+        # Nothing written in sandbox
+        self.assertEqual(os.listdir(self.tmp_root), [])
+
+    def test_U5_out_of_order_first_chunk_skipped(self):
+        """U5: if first seen chunkIdx > 0, it's silently skipped (no new session)."""
+        # No chunk 0 first; this should be skipped.
+        self.agent.handle_file_upload(
+            self._msg('late.bin', 'late.bin', base64.b64encode(b'late').decode('ascii'), 2, True),
+            lambda m: self.sent.append(m)
+        )
+        # No file written
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_root, 'late.bin')))
+        # No result emitted either (silently dropped)
+        results = [m for m in self.sent if m.get('type') == 'file_request_result']
+        self.assertEqual(len(results), 0)
+        # And no lingering session
+        self.assertEqual(self.agent.UPLOAD_SESSIONS, {})
+
+    def test_U6_size_limit_enforced(self):
+        """U6: a single chunk that would push the file over UPLOAD_MAX_BYTES is rejected."""
+        # Use a tiny cap for the test.
+        with patch.object(self.agent, 'UPLOAD_MAX_BYTES', 4):
+            # 1st chunk: 3 bytes, OK
+            self.agent.handle_file_upload(
+                self._msg('big.bin', 'big.bin', base64.b64encode(b'AAA').decode('ascii'), 0, False),
+                lambda m: self.sent.append(m)
+            )
+            # 2nd chunk: 5 more bytes -> would exceed 4
+            self.agent.handle_file_upload(
+                self._msg('big.bin', 'big.bin', base64.b64encode(b'BBBBB').decode('ascii'), 1, True),
+                lambda m: self.sent.append(m)
+            )
+        # File should be either absent or contain only the 3 bytes (cap was hit).
+        target = os.path.join(self.tmp_root, 'big.bin')
+        if os.path.exists(target):
+            with open(target, 'rb') as f:
+                self.assertLessEqual(len(f.read()), 4)
+        # A rejection result should have been emitted
+        rejects = [m for m in self.sent if m.get('type') == 'file_request_result' and not m.get('ok')]
+        self.assertTrue(any('too large' in r.get('error', '').lower() for r in rejects),
+                        f"expected 'too large' rejection, got: {self.sent}")
+        # Session cleaned up after rejection
+        self.assertEqual(self.agent.UPLOAD_SESSIONS, {})
 
 
 if __name__ == '__main__':
