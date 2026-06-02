@@ -474,6 +474,25 @@ wss.on('connection', (ws, req) => {
                     }
                     return;
                 }
+
+                // Handle clipboard response from agent
+                // (clipboard set/get — no sessionId; the agent's
+                //  response goes to ALL clients viewing this agent.)
+                if (msg.type === 'clipboard') {
+                    CLIENTS.forEach((client) => {
+                        if (client.agentId === agentId && client.ws.readyState === 1) {
+                            client.ws.send(JSON.stringify({
+                                type: 'clipboard',
+                                action: msg.action,
+                                ok: msg.ok,
+                                content: msg.content,
+                                bytes: msg.bytes,
+                                error: msg.error
+                            }));
+                        }
+                    });
+                    return;
+                }
             }
             
             // ----- CLIENT CONNECTION -----

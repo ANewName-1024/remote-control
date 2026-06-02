@@ -13,7 +13,7 @@ $tests = @(
     @{ Name = 'test_path_security.js (Path security, 16 asserts)'; Cmd = 'node'; Args = @('test_path_security.js') },
     @{ Name = 'test_http_api.js (HTTP REST API, 29 asserts)'; Cmd = 'node'; Args = @('test_http_api.js') },
     @{ Name = 'test_ws_protocol.js (WebSocket protocol, 14 asserts)'; Cmd = 'node'; Args = @('test_ws_protocol.js') },
-    @{ Name = 'test_e2e_flow.js (End-to-end, 21 asserts)'; Cmd = 'node'; Args = @('test_e2e_flow.js') }
+    @{ Name = 'test_e2e_flow.js (End-to-end, 24 asserts)'; Cmd = 'node'; Args = @('test_e2e_flow.js') }
 )
 
 $totalPassed = 0
@@ -55,7 +55,7 @@ if ($python) {
     try {
         $p = Start-Process -FilePath 'python' -ArgumentList @('-m', 'unittest', 'tests.test_delta_encoder', 'tests.test_mouse_keyboard', '-v') -NoNewWindow -Wait -PassThru
         $results += [PSCustomObject]@{
-            Name = 'Python unittest (delta_encoder 12 + mouse_keyboard 42 = 54 tests)'
+            Name = 'Python unittest (delta_encoder 12 + mouse_keyboard 51 = 63 tests)'
             ExitCode = $p.ExitCode
         }
         if ($p.ExitCode -ne 0) {

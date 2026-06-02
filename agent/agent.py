@@ -531,6 +531,99 @@ def handle_file_upload(msg, send_fn):
             'error': str(e)
         })
 
+def handle_clipboard(msg, send_fn):
+    """Handle clipboard set/get from server.
+
+    Message shape (from web client):
+      { type: 'clipboard', action: 'set', content: '<text>' }
+      { type: 'clipboard', action: 'get' }
+
+    Response shape (back to client):
+      { type: 'clipboard', action: 'set', ok: true|false, bytes?, error? }
+      { type: 'clipboard', action: 'get', ok: true|false, content?, error? }
+    """
+    try:
+        action = msg.get('action', '')
+
+        if action == 'set':
+            content = msg.get('content', '')
+            if not isinstance(content, str):
+                content = str(content)
+            if not WIN32_AVAILABLE:
+                send_fn({
+                    'type': 'clipboard', 'action': 'set',
+                    'ok': False, 'error': 'win32clipboard not available'
+                })
+                return
+            try:
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(content)
+                win32clipboard.CloseClipboard()
+                logging.info(f"Clipboard set ({len(content)} bytes)")
+                send_fn({
+                    'type': 'clipboard', 'action': 'set',
+                    'ok': True, 'bytes': len(content)
+                })
+            except Exception as e:
+                logging.error(f"Clipboard set error: {e}")
+                try: win32clipboard.CloseClipboard()
+                except Exception: pass
+                send_fn({
+                    'type': 'clipboard', 'action': 'set',
+                    'ok': False, 'error': str(e)
+                })
+
+        elif action == 'get':
+            if not WIN32_AVAILABLE:
+                send_fn({
+                    'type': 'clipboard', 'action': 'get',
+                    'ok': False, 'error': 'win32clipboard not available'
+                })
+                return
+            try:
+                win32clipboard.OpenClipboard()
+                try:
+                    text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                finally:
+                    win32clipboard.CloseClipboard()
+                if text is None:
+                    # Try ANSI fallback
+                    try:
+                        win32clipboard.OpenClipboard()
+                        try:
+                            text = win32clipboard.GetClipboardData(win32con.CF_TEXT)
+                        finally:
+                            win32clipboard.CloseClipboard()
+                    except Exception:
+                        text = ''
+                logging.info(f"Clipboard get ({len(text)} bytes)")
+                send_fn({
+                    'type': 'clipboard', 'action': 'get',
+                    'ok': True, 'content': text
+                })
+            except Exception as e:
+                logging.error(f"Clipboard get error: {e}")
+                try: win32clipboard.CloseClipboard()
+                except Exception: pass
+                send_fn({
+                    'type': 'clipboard', 'action': 'get',
+                    'ok': False, 'error': str(e)
+                })
+
+        else:
+            send_fn({
+                'type': 'clipboard', 'action': action,
+                'ok': False, 'error': f'Unknown clipboard action: {action}'
+            })
+
+    except Exception as e:
+        logging.error(f"Clipboard dispatch error: {e}")
+        send_fn({
+            'type': 'clipboard', 'action': msg.get('action', ''),
+            'ok': False, 'error': str(e)
+        })
+
 # ============================================================
 # WebSocket Client
 # ============================================================
@@ -1067,6 +1160,10 @@ class RemoteControlApp:
             elif action == 'upload':
                 # Chunked upload: handled inline (stateful across chunks).
                 handle_file_upload(msg, self.ws_client.send)
+
+        elif t == 'clipboard':
+            # Clipboard set/get — handled inline (stateless, fast).
+            handle_clipboard(msg, self.ws_client.send)
     
     def _start_screen_stream(self):
         if self.stream_running:

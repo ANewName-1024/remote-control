@@ -208,6 +208,37 @@ function waitFor(messages, predicate, timeoutMs = 2000) {
         check('agent receives upload path + filename',
               upl.path === 'C:/Users/test/upload.txt' && upl.filename === 'upload.txt');
 
+        // ---------- T11: Client → clipboard set → Agent (GAP-3 fix) ----------
+        console.log('\n[T11] Client clipboard set → Agent (server forwarding)');
+        clientWs.send(JSON.stringify({
+            type: 'clipboard', action: 'set', content: 'remote text'
+        }));
+        // Filter by content to disambiguate from earlier T08's 'test' content
+        const cbs = await waitFor(agentMsgs,
+            m => m.type === 'clipboard' && m.action === 'set' && m.content === 'remote text', 2000);
+        check('agent receives clipboard:set with content', cbs.content === 'remote text',
+              JSON.stringify(cbs));
+
+        // ---------- T12: Agent → clipboard result → Client (server routing) ----------
+        console.log('\n[T12] Agent clipboard result → Client (server routing)');
+        // The fake agent simulates the agent's response to a clipboard get.
+        agentWs.send(JSON.stringify({
+            type: 'clipboard', action: 'get', ok: true, content: 'fake remote clipboard'
+        }));
+        const cbg = await waitFor(clientMsgs,
+            m => m.type === 'clipboard' && m.action === 'get' && m.ok, 2000);
+        check('client receives clipboard:get with content',
+              cbg.content === 'fake remote clipboard', JSON.stringify(cbg));
+
+        // ---------- T13: Agent → clipboard set ok → Client ----------
+        console.log('\n[T13] Agent clipboard set ok → Client');
+        agentWs.send(JSON.stringify({
+            type: 'clipboard', action: 'set', ok: true, bytes: 11
+        }));
+        const cbsOk = await waitFor(clientMsgs,
+            m => m.type === 'clipboard' && m.action === 'set' && m.ok, 2000);
+        check('client receives clipboard:set ok with bytes', cbsOk.bytes === 11, JSON.stringify(cbsOk));
+
         agentWs.close();
         clientWs.close();
 

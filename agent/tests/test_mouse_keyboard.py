@@ -339,11 +339,13 @@ class TestOnMessageDispatch(unittest.TestCase):
         self._key_p = patch.object(self.agent, 'handle_key')
         self._download_p = patch.object(self.agent, 'handle_file_download')
         self._upload_p = patch.object(self.agent, 'handle_file_upload')
+        self._clipboard_p = patch.object(self.agent, 'handle_clipboard')
         self._thread_p = patch.object(self.agent.threading, 'Thread')
         self._mouse = self._mouse_p.start()
         self._key = self._key_p.start()
         self._download = self._download_p.start()
         self._upload = self._upload_p.start()
+        self._clipboard = self._clipboard_p.start()
         self._thread = self._thread_p.start()
 
     def tearDown(self):
@@ -351,6 +353,7 @@ class TestOnMessageDispatch(unittest.TestCase):
         self._key_p.stop()
         self._download_p.stop()
         self._thread_p.stop()
+        self._clipboard_p.stop()
 
     def test_D12_mouse_dispatched(self):
         self.app._on_message({'type': 'mouse', 'x': 1, 'y': 2, 'button': 'left', 'action': 'click'})
@@ -393,6 +396,24 @@ class TestOnMessageDispatch(unittest.TestCase):
         self.assertEqual(call_msg['action'], 'upload')
         self.assertEqual(call_msg['filename'], 'x.txt')
         self.assertEqual(call_msg['chunk'], 'aGVsbG8=')
+
+    def test_D16b_clipboard_dispatched(self):
+        """D16b: GAP-3 fix — agent now handles clipboard via handle_clipboard (inline, no thread)."""
+        self.app._on_message({
+            'type': 'clipboard', 'action': 'set', 'content': 'hello'
+        })
+        self._thread.assert_not_called()
+        self._clipboard.assert_called_once()
+        call_msg = self._clipboard.call_args.args[0]
+        self.assertEqual(call_msg['action'], 'set')
+        self.assertEqual(call_msg['content'], 'hello')
+
+    def test_D16c_clipboard_get_dispatched(self):
+        """D16c: 'get' action also dispatched to handle_clipboard."""
+        self.app._on_message({'type': 'clipboard', 'action': 'get'})
+        self._clipboard.assert_called_once()
+        call_msg = self._clipboard.call_args.args[0]
+        self.assertEqual(call_msg['action'], 'get')
 
     def test_unknown_type_ignored(self):
         """Unknown message types don't crash _on_message."""
@@ -615,6 +636,145 @@ class TestHandleFileUpload(unittest.TestCase):
                         f"expected 'too large' rejection, got: {self.sent}")
         # Session cleaned up after rejection
         self.assertEqual(self.agent.UPLOAD_SESSIONS, {})
+
+
+class TestHandleClipboard(unittest.TestCase):
+    """GAP-3 fix: handle_clipboard — set/get Windows clipboard from web client.
+
+    Covers:
+    - CB1: set writes via win32clipboard and returns ok=True
+    - CB2: set with empty content still writes
+    - CB3: get reads via win32clipboard and returns content
+    - CB4: get with CF_UNICODETEXT returning None falls back to CF_TEXT
+    - CB5: set error from win32 returns ok=False + error message
+    - CB6: unknown action returns ok=False with error
+    - CB7: WIN32_AVAILABLE=False returns ok=False with not-available error
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent, _ = try_import_agent()
+
+    def setUp(self):
+        self.sent = []
+        # Reset the MagicMock for win32clipboard (try_import_agent pre-injects it)
+        # but preserve any pre-set return values from earlier tests in this class.
+        # We re-create the mock for full isolation.
+        if hasattr(self.agent, 'win32clipboard'):
+            self.agent.win32clipboard.reset_mock()
+        if hasattr(self.agent, 'win32con'):
+            self.agent.win32con.reset_mock()
+
+    def _send(self, m):
+        self.sent.append(m)
+
+    # ---------- CB1: set ----------
+    def test_CB1_set_writes_and_returns_ok(self):
+        """CB1: 'set' action calls win32clipboard and returns ok=True with bytes."""
+        self.agent.win32clipboard.GetClipboardData = MagicMock(return_value=None)  # unused
+        self.agent.handle_clipboard(
+            {'type': 'clipboard', 'action': 'set', 'content': 'hello'},
+            self._send
+        )
+        self.agent.win32clipboard.OpenClipboard.assert_called_once()
+        self.agent.win32clipboard.SetClipboardText.assert_called_once_with('hello')
+        self.agent.win32clipboard.CloseClipboard.assert_called_once()
+        results = [m for m in self.sent if m['type'] == 'clipboard' and m['action'] == 'set']
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['bytes'], 5)  # len('hello')
+
+    # ---------- CB2: set empty ----------
+    def test_CB2_set_empty(self):
+        """CB2: empty string still calls SetClipboardText('') and returns bytes=0."""
+        self.agent.handle_clipboard(
+            {'type': 'clipboard', 'action': 'set', 'content': ''},
+            self._send
+        )
+        self.agent.win32clipboard.SetClipboardText.assert_called_once_with('')
+        results = [m for m in self.sent if m['type'] == 'clipboard' and m['action'] == 'set']
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['bytes'], 0)
+
+    # ---------- CB3: get ----------
+    def test_CB3_get_reads_unicode(self):
+        """CB3: 'get' action reads CF_UNICODETEXT and returns content."""
+        self.agent.win32con.CF_UNICODETEXT = 13  # real value
+        self.agent.win32clipboard.GetClipboardData = MagicMock(return_value='remote text')
+        self.agent.handle_clipboard(
+            {'type': 'clipboard', 'action': 'get'},
+            self._send
+        )
+        self.agent.win32clipboard.OpenClipboard.assert_called_once()
+        self.agent.win32clipboard.GetClipboardData.assert_called_once_with(13)
+        self.agent.win32clipboard.CloseClipboard.assert_called_once()
+        results = [m for m in self.sent if m['type'] == 'clipboard' and m['action'] == 'get']
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['content'], 'remote text')
+
+    # ---------- CB4: get falls back to CF_TEXT ----------
+    def test_CB4_get_ansi_fallback(self):
+        """CB4: if CF_UNICODETEXT returns None, fall back to CF_TEXT."""
+        self.agent.win32con.CF_UNICODETEXT = 13
+        self.agent.win32con.CF_TEXT = 1
+        # First call (UNICODE) returns None; second (ANSI) returns 'ansi text'
+        self.agent.win32clipboard.GetClipboardData = MagicMock(side_effect=[None, 'ansi text'])
+        self.agent.handle_clipboard(
+            {'type': 'clipboard', 'action': 'get'},
+            self._send
+        )
+        self.assertEqual(self.agent.win32clipboard.GetClipboardData.call_count, 2)
+        results = [m for m in self.sent if m['type'] == 'clipboard' and m['action'] == 'get']
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['content'], 'ansi text')
+
+    # ---------- CB5: set error ----------
+    def test_CB5_set_error(self):
+        """CB5: win32 error during set returns ok=False + error message."""
+        self.agent.win32clipboard.SetClipboardText = MagicMock(
+            side_effect=OSError('access denied')
+        )
+        self.agent.handle_clipboard(
+            {'type': 'clipboard', 'action': 'set', 'content': 'x'},
+            self._send
+        )
+        results = [m for m in self.sent if m['type'] == 'clipboard' and m['action'] == 'set']
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]['ok'])
+        self.assertIn('access denied', results[0]['error'])
+
+    # ---------- CB6: unknown action ----------
+    def test_CB6_unknown_action(self):
+        """CB6: unknown action returns ok=False with error mentioning the bad action."""
+        self.agent.handle_clipboard(
+            {'type': 'clipboard', 'action': 'teleport'},
+            self._send
+        )
+        results = [m for m in self.sent if m['type'] == 'clipboard']
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]['ok'])
+        self.assertIn('teleport', results[0]['error'])
+
+    # ---------- CB7: win32 not available ----------
+    def test_CB7_no_win32(self):
+        """CB7: when WIN32_AVAILABLE=False, returns ok=False with not-available error."""
+        with patch.object(self.agent, 'WIN32_AVAILABLE', False):
+            self.agent.handle_clipboard(
+                {'type': 'clipboard', 'action': 'set', 'content': 'x'},
+                self._send
+            )
+            self.agent.handle_clipboard(
+                {'type': 'clipboard', 'action': 'get'},
+                self._send
+            )
+        results = [m for m in self.sent if m['type'] == 'clipboard']
+        self.assertEqual(len(results), 2)
+        for r in results:
+            self.assertFalse(r['ok'])
+            self.assertIn('not available', r['error'])
 
 
 if __name__ == '__main__':

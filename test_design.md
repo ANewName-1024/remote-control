@@ -166,10 +166,10 @@ remote-control/
 | test_path_security.js | 12 | 16 | < 2s |
 | test_http_api.js | 21 | 29 | < 3s |
 | test_ws_protocol.js | 11 | 14 | < 3s |
-| test_e2e_flow.js | 8 | 21 | < 4s |
+| test_e2e_flow.js | 8 | 24 | < 4s |
 | test_delta_encoder.py | 10 | 12 | < 2s |
-| test_mouse_keyboard.py | 30 | 42（含 U1-U6） | < 5s |
-| **合计** | **119** | **161** | **< 25s** |
+| test_mouse_keyboard.py | 30 | 51（含 U1-U6 + CB1-CB7 + D16b/c） | < 5s |
+| **合计** | **119** | **173** | **< 25s** |
 
 ---
 
@@ -202,7 +202,7 @@ process.env.ACCESS_PASSWORD = PASSWORD;
 |------|------|------|
 | ~~GAP-1~~ | **已修复**：Agent 已实现 `file_request:upload`（`handle_file_upload`） | 客户端 `index.html doUpload` 的 chunked upload 协议现在真正能落地。新增 `agent/tests/test_mouse_keyboard.py` 下的 6 个 `TestHandleFileUpload` 用例 + 1 个 dispatch 用例。 |
 | ~~GAP-2~~ | **已修复**：Server 为 `file_request` 也创建 server session | Agent 用 client 传来的 sessionId 发回 `file_chunk`，server 现在能正确路由回 client。原 e2e T07 必须复用 exec session 绕过此问题；修复后新增 T09 用 file_request 自己的 session 验证 file_chunk 路由。 |
-| GAP-3 | `_on_message` 没有 `clipboard` 分支 | server 转发 `clipboard` 消息到 agent，agent 不处理。需确认 SPEC 是否要支持。 |
+| ~~GAP-3~~ | **已修复**：Agent 实现 `handle_clipboard`（set + get + CF_UNICODETEXT/CF_TEXT fallback），server 显式路由 `clipboard` 从 agent 到 client，client 加"剪贴板" tab UI | `agent/agent.py` `handle_clipboard` + `_on_message` `clipboard` 分支；`server/index.js` agent→client 路由；`server/static/index.html` `clipboardGet`/`clipboardSet` 函数和 panel |
 | GAP-4 | `multer` 500MB 上限与 Deploy 50MB 上限不一致 | 文档化差异，非 bug |
 
 ---

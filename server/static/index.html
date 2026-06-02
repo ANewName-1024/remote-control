@@ -152,6 +152,7 @@
             <div class="tab active" onclick="switchTab('terminal')">终端</div>
             <div class="tab" onclick="switchTab('files')">文件</div>
             <div class="tab" onclick="switchTab('info')">信息</div>
+            <div class="tab" onclick="switchTab('clipboard')">剪贴板</div>
         </div>
         <div class="panel active" id="panelTerminal">
             <div class="panel-terminal" id="terminalOutput"></div>
@@ -174,6 +175,16 @@
                 <div class="info-row"><span class="info-label">主机名:</span><span id="infoHostname">-</span></div>
                 <div class="info-row"><span class="info-label">操作系统:</span><span id="infoOS">-</span></div>
                 <div class="info-row"><span class="info-label">延迟:</span><span id="infoLatency">-</span></div>
+            </div>
+        </div>
+        <div class="panel" id="panelClipboard">
+            <div style="padding:14px;display:flex;flex-direction:column;gap:12px;height:100%">
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="btn" onclick="clipboardGet()">📋 读取远程剪贴板</button>
+                    <button class="btn" onclick="clipboardSet()">📤 写入到远程</button>
+                </div>
+                <textarea id="clipboardText" placeholder="点上面的“读取”会显示远程剪贴板内容；也可以直接编辑后“写入”" style="flex:1;min-height:140px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px;font-family:monospace;font-size:13px;resize:vertical"></textarea>
+                <div id="clipboardStatus" style="font-size:12px;color:var(--text-dim);min-height:16px"></div>
             </div>
         </div>
     </div>
@@ -457,6 +468,7 @@ function handleMsg(msg) {
             break;
         case 'output': handleOutput(msg); break;
         case 'file_chunk': handleFileChunk(msg); break;
+        case 'clipboard': handleClipboard(msg); break;
     }
 }
 
@@ -621,6 +633,36 @@ function handleFileChunk(msg) {
     } else {
         pf.chunks.push(msg.chunk);
     }
+}
+
+function handleClipboard(msg) {
+    const status = document.getElementById('clipboardStatus');
+    if (!msg.ok) {
+        status.textContent = '❌ 错误: ' + (msg.error || 'unknown');
+        status.style.color = 'var(--err, #f55)';
+        showToast('剪贴板操作失败: ' + (msg.error || 'unknown'), 'error');
+        return;
+    }
+    if (msg.action === 'get') {
+        document.getElementById('clipboardText').value = msg.content || '';
+        status.textContent = '✓ 已读取 (' + (msg.content || '').length + ' 字符)';
+        status.style.color = 'var(--ok, #5a5)';
+    } else if (msg.action === 'set') {
+        status.textContent = '✓ 已写入 (' + (msg.bytes || 0) + ' 字节)';
+        status.style.color = 'var(--ok, #5a5)';
+    }
+}
+
+function clipboardGet() {
+    if (!S.connected) { showToast('未连接', 'error'); return; }
+    send({ type: 'clipboard', action: 'get' });
+    document.getElementById('clipboardStatus').textContent = '⏳ 读取中...';
+}
+function clipboardSet() {
+    if (!S.connected) { showToast('未连接', 'error'); return; }
+    const text = document.getElementById('clipboardText').value;
+    send({ type: 'clipboard', action: 'set', content: text });
+    document.getElementById('clipboardStatus').textContent = '⏳ 写入中...';
 }
 
 function doUpload() {
