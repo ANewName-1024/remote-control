@@ -55,20 +55,18 @@ log = logging.getLogger('agent.ipc')
 
 
 def _read_exact(handle, n: int) -> Optional[bytes]:
-    """Read exactly n bytes from a win32file handle. None on EOF/closed pipe."""
+    """Read exactly n bytes from a win32file handle. None on EOF/closed pipe.
+
+    Works with PIPE_BYTE_STREAM pipes: ReadFile may return fewer than n bytes,
+    so we loop until we accumulate n bytes.
+    """
     import win32file  # type: ignore
     buf = b''
     while len(buf) < n:
         try:
-            # ReadFile returns (hr, data); message-mode pipes return one
-            # whole message at a time. We loop until we have n bytes.
             hr, chunk = win32file.ReadFile(handle, n - len(buf))
-            if hr != 0:
-                # ERROR_MORE_DATA = 234 means we got less than asked; that's fine
-                if hr == 234:
-                    pass
-                else:
-                    return None
+            if hr != 0 and hr != 234:  # 234 = ERROR_MORE_DATA (legacy)
+                return None
             if not chunk:
                 return None
             buf += chunk
@@ -112,13 +110,21 @@ def read_msg(handle) -> Optional[dict]:
 
 
 def send_msg(handle, msg: dict) -> None:
-    """Send a length-prefixed JSON message."""
+    """Send a length-prefixed JSON message. Raises on error."""
     import win32file  # type: ignore
     data = pack(msg)
-    win32file.WriteFile(handle, data)
+    err, written = win32file.WriteFile(handle, data)
+    if err != 0 and err != 234:  # 234 = ERROR_MORE_DATA (legacy message-mode)
+        raise IOError(f'WriteFile failed: err={err} written={written}/{len(data)}')
+    if written != len(data):
+        raise IOError(f'WriteFile short write: {written}/{len(data)}')
 
 
 def send_frame(handle, data: bytes) -> None:
-    """Send a length-prefixed binary frame."""
+    """Send a length-prefixed binary frame. Raises on error."""
     import win32file  # type: ignore
-    win32file.WriteFile(handle, pack(data))
+    err, written = win32file.WriteFile(handle, pack(data))
+    if err != 0 and err != 234:
+        raise IOError(f'WriteFile failed: err={err} written={written}/{len(data)+4}')
+    # Note: pack() adds 4 length bytes; we don't verify written == len(data)+4 because
+    # the framing is the responsibility of the protocol, not the transport.

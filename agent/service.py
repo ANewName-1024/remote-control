@@ -281,7 +281,11 @@ class PipeServer:
                 handle = win32pipe.CreateNamedPipe(
                     pipe_name,
                     win32pipe.PIPE_ACCESS_DUPLEX,
-                    win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+                    # PIPE_BYTE_STREAM mode: ReadFile(h, N) reads up to N bytes from the
+                    # stream. We rely on the length-prefix framing in agent/protocol.py
+                    # to delimit messages. PIPE_TYPE_MESSAGE is harder because ReadFile
+                    # returns one whole message at a time regardless of N requested.
+                    win32pipe.PIPE_WAIT,
                     win32pipe.PIPE_UNLIMITED_INSTANCES,  # OS multiplexes; we close the old handle per-connection
                     1024 * 1024,  # out buffer 1MB
                     1024 * 1024,  # in buffer 1MB
@@ -385,26 +389,26 @@ class PipeServer:
                 return False
 
     def read_frame(self, timeout_ms: int = 100) -> Optional[bytes]:
-        """Try to read a frame from the frame pipe. Non-blocking."""
+        """Try to read a frame from the frame pipe. Non-blocking.
+
+        TODO(perf): on a busy service this should be a dedicated thread
+        doing a blocking ReadFile loop, not polled from the main loop.
+        For now we just attempt a 1-byte read and only continue if data
+        is available.
+        """
         import win32file  # type: ignore
         import win32pipe  # type: ignore
         with self.frame_lock:
             if not self.frame_conn:
                 return None
             try:
-                # PeekNamedPipe to check for data
-                # Returns (data_available, bytes_left, message_length)
-                # If 0, no data; if >0, read what's there.
-                avail, _, _ = win32pipe.PeekNamedPipe(self.frame_conn, 64 * 1024)
-                if avail < 4:
-                    return None
-                # Read exactly 4 bytes header + payload
-                # Use win32file.ReadFile to honor the pipe's message mode
-                # (mss already returns data; we use the protocol helpers)
-                return ipc.read_envelope(self.frame_conn)
+                avail, _, _ = win32pipe.PeekNamedPipe(self.frame_conn, 0)
             except Exception as e:
-                log.debug(f'read_frame: {e}')
+                log.debug(f'read_frame: PeekNamedPipe: {e}')
                 return None
+            if avail < 4:
+                return None
+            return ipc.read_envelope(self.frame_conn)
 
     def stop(self):
         self.running = False
