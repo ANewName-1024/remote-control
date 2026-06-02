@@ -5,10 +5,25 @@ Pillow>=9.0
 pyautogui>=0.9.54
 pywin32>=300
 psutil>=5.0
+comtypes>=1.1
 
-# DXGI Desktop Duplication capture (preferred for locked-user-session capture)
+# DXGI Desktop Duplication capture (preferred for unlocked user sessions).
 # Falls back to mss / PIL.ImageGrab if unavailable.
 dxcam>=0.3
+
+# Windows.Graphics.Capture (WGC) UWP capture (the only capture API that
+# works in a LOCKED Windows session -- DXGI / GDI / BitBlt are blocked
+# by DWM when the workstation is locked).
+#
+# winrt-python is the official Microsoft binding. We pull in the four
+# packages we need and declare WGC as available when all four import
+# cleanly. The agent.capture module uses WGC as the highest-priority
+# backend when present, otherwise falls back to DXGI / mss / PIL.
+winrt-runtime>=3.0
+winrt-Windows.Graphics.Capture>=3.0
+winrt-Windows.Graphics.DirectX.Direct3D11>=3.0
+winrt-Windows.Foundation>=3.0
+winrt-Windows.UI.Composition>=3.0
 
 # PyInstaller (for building .exe)
 pyinstaller>=6.0

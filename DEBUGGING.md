@@ -154,3 +154,94 @@ OpenClaw session token 上限 200k。如果感觉卡：
 - [ ] install-windows-agent.ps1 双进程版
 - [ ] WebSocket ↔ helper 桥接
 - [ ] 完整的端到端实测（service 可达 + helper 抓帧 + WS 推流 + 客户端解码）
+
+
+---
+
+## WGC (Windows.Graphics.Capture) UWP 实现状态 (2026-06-02)
+
+### 进展
+
+| 阶段 | 状态 | commit |
+|------|------|--------|
+| IID 找对（3628E81B-3CAC-4C60-B7F4-**23CE0E0C3356**）| ✅ | 本次 session |
+| COM apartment init + HSTRING | ✅ | 本次 session |
+| RoGetActivationFactory + QI IID_IGraphicsCaptureItemInterop | ✅ | 本次 session |
+| CreateForMonitor **3-arg 签名**（HMONITOR + REFIID + void\*\*）| ✅ | 本次 session |
+| Wrap IGraphicsCaptureItem* 为 winrt 对象 | ❌ | — |
+| Direct3D11CaptureFramePool / Session ctypes 实现 | ❌ | — |
+| 帧 surface readback（D3D11 staging texture）| ❌ | — |
+| 锁屏实测 | ❌ | 需解锁后 |
+
+### 关键调试发现
+
+#### 1. IID 末尾是 33 56 不是 2A 54
+
+网上资料经常贴错（甚至 Microsoft Learn 示例）。`Windows.Graphics.Capture.Interop.h`（SDK build 26100）实际定义：
+```c
+DECLARE_INTERFACE_IID_(IGraphicsCaptureItemInterop, IUnknown,
+    "3628E81B-3CAC-4C60-B7F4-23CE0E0C3356")
+```
+**2A 54 会导致 E_NOINTERFACE**（QI 失败，但 RoGetActivationFactory 本身能跑通）。调试时务必看真 SDK header。
+
+#### 2. CreateForMonitor 是 3-arg 不是 5-arg
+
+新 Windows 10/11 上是：
+```c
+HRESULT CreateForMonitor(HMONITOR monitor, REFIID riid, void **result);
+```
+**不是** 5-arg 版本（带 D3D11 device）。D3D11 device 由系统隐式绑定。传多了 arg 会 E_INVALIDARG。
+
+#### 3. RoGetActivationFactory 要 HSTRING 不接 wchar_p
+
+```python
+WindowsCreateString(class_name, len(class_name), &hstring)
+RoGetActivationFactory(hstring.value, IID, &factory)  # 用 hstring.value 不是 wchar_p
+```
+不转 HSTRING 会 E_INVALIDARG。
+
+#### 4. winrt-python 3.2.1 不暴露 CreateForMonitor 静态方法
+
+`GraphicsCaptureItem.create_for_monitor` 不存在。只能走 `RoGetActivationFactory + QI + IGraphicsCaptureItemInterop::CreateForMonitor` COM 路径。
+
+#### 5. c_void_p argtype 是必须的（不要省）
+
+不设 `RoGetActivationFactory.argtypes` -> 64-bit HSTRING overflow 到 32-bit register -> ctypes ArgumentError。设了 ctypes 才能正确 marshal 64-bit handle。
+
+### 已知坑（仍未解决）
+
+#### winrt.GraphicsCaptureItem._from 只接 1 个 arg
+`GraphicsCaptureItem._from(p_item.value)` -> "takes exactly one argument (2 given)"。
+`Object(ptr)` -> "cannot create 'Object' instances"。
+没有 public API 从 raw `IGraphicsCaptureItem*` 创建 winrt 包装对象。
+
+**workaround 候选**：
+- a) 写 comtypes 接口定义，从 raw pointer 创建 COM wrapper（200 行）
+- b) 整个 WGC 栈用 ctypes 实现，绕过 winrt-python（300+ 行）
+- c) 等 winrt-python 升级到支持 `_from(ptr, iid)` 双参版本
+
+### 现状
+
+`agent/wgc.py` 已能：
+- ✅ 编译（import 不出错）
+- ✅ 跑 D3D11 device init
+- ✅ 跑 HSTRING + RoGetActivationFactory + QI + CreateForMonitor（拿到 IGraphicsCaptureItem* 指针）
+- ❌ wrap 失败 -> 抛 `NotImplementedError` -> capture.py fall through 到 dxcam/mss/PIL
+
+**未完工**。建议下次 session 选 (a) 或 (b) 方案补完 4-6 小时工作量。
+
+### 验证
+
+```powershell
+# 确认 WGC_AVAILABLE=True（所有依赖装好）
+& "$env:APPDATA\RemoteControlAgent\venv\Scripts\python.exe" -c "from agent.wgc import WGC_AVAILABLE; print(WGC_AVAILABLE)"
+# True
+
+# 确认 ScreenCapture 还能 fall through
+& "$env:APPDATA\RemoteControlAgent\venv\Scripts\python.exe" -c "from agent.capture import ScreenCapture; c = ScreenCapture(); print(c.backend, c.width, c.height)"
+# mss 2560x1440（WGC init 抛 NotImplementedError -> fall through 到 mss）
+
+# 跑 WGC 框架 smoke test
+& "$env:APPDATA\RemoteControlAgent\venv\Scripts\python.exe" -m unittest tests.test_wgc -v
+# Ran 4 tests in 0.3s OK
+```

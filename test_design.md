@@ -92,7 +92,7 @@
 | D13 | 消息分发 — 收到 `key` | `_on_message` | `mouse_keyboard` T24 | P | P0 |
 | D14 | 消息分发 — 收到 `exec` | `_on_message` | `mouse_keyboard` T25 | P | P0 |
 | D15 | 消息分发 — 收到 `file_request:download` | `_on_message` | `mouse_keyboard` T26 | P | P0 |
-| D16 | **未实现**：agent 收到 `file_request:upload` 时无处理 | `_on_message` | `mouse_keyboard` T27 | P | P1（记录为 Gap） |
+| D16 | 消息分发 — 收到 `file_request:upload` | `_on_message` + `handle_file_upload` | `mouse_keyboard` T27（dispatch） + `TestHandleFileUpload` U1-U6（handler） | P | P0 |
 | D17 | 机器指纹确定性 | `_get_machine_fingerprint` | `mouse_keyboard` T28 | P | P1 |
 | D18 | 凭据持久化（首次创建 + 后续读取） | `get_or_create_credentials` | `mouse_keyboard` T29 | P | P0 |
 | D19 | 单实例锁 | `__main__` 锁 | `mouse_keyboard` T30 | P | P2 |

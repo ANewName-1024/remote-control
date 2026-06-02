@@ -36,19 +36,14 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-# WinRT / WGC requires:
-#   pip install winrt-runtime winrt-Windows.Graphics.Capture
-#   pip install winrt-Windows.Foundation winrt-Windows.UI.Composition
-# and a modern Direct3D11 binding. These are heavy deps so we only
-# declare WGC as available if all pieces are importable.
-WGC_AVAILABLE = False
+# WGC (Windows.Graphics.Capture) -- the only capture method that works
+# in a locked session. Real implementation lives in agent.wgc; here we
+# just re-export the availability flag.
 try:
-    import winrt  # type: ignore  # noqa: F401
-    import winrt.windows.graphics.capture as wgc  # type: ignore
-    import winrt.windows.graphics.directx.direct3d11 as d3d11  # type: ignore
-    WGC_AVAILABLE = True
+    from agent.wgc import WgcCapture, WGC_AVAILABLE  # type: ignore
 except ImportError:
-    pass
+    WGC_AVAILABLE = False
+    WgcCapture = None  # type: ignore
 
 
 log = logging.getLogger('agent.capture')
@@ -66,10 +61,7 @@ class ScreenCapture:
         self.width: int = 0
         self.height: int = 0
         # backend-specific resources
-        self._wgc_frame_pool = None
-        self._wgc_session = None
-        self._wgc_item = None
-        self._wgc_d3d_device = None
+        self._wgc = None
         self._cam: Optional['dxcam.DXCamera'] = None
         self._sct = None
         self._init_backend()
@@ -126,15 +118,15 @@ class ScreenCapture:
     def _init_wgc(self):
         """Initialize Windows.Graphics.Capture for the primary monitor.
 
-        Note: a full implementation requires Direct3D11 device creation
-        via ctypes + d3d11.dll. This skeleton provides the wiring; the
-        d3d11 device init is left as a future PR (requires ~80 lines of
-        ctypes boilerplate for CreateDevice + QueryInterface).
+        Implementation in agent.wgc -- the heavy lifting (D3D11 device
+        init, IGraphicsCaptureItemInterop COM call, frame surface readback)
+        is in ctypes. The high-level winrt objects are wired in WgcCapture.
         """
-        # TODO(2.1+): implement d3d11 device init via ctypes
-        #   d3d11.CreateDevice(None, 0, 0, 0, None, 0, D3D_DRIVER_TYPE_HARDWARE)
-        #   + QI for ID3D11Device5 (needed for CreateDirect3D11SurfaceFromHandle)
-        raise NotImplementedError('WGC backend skeleton only; full implementation in 2.1+')
+        if WgcCapture is None:
+            raise RuntimeError('agent.wgc.WgcCapture not importable')
+        self._wgc = WgcCapture()
+        self.width  = self._wgc.width
+        self.height = self._wgc.height
 
     def grab(self) -> Optional[np.ndarray]:
         """Grab a single frame. Returns HxWx3 RGB uint8 array, or None on failure."""
@@ -165,9 +157,7 @@ class ScreenCapture:
         return None
 
     def _grab_wgc(self) -> Optional[np.ndarray]:
-        """TODO(2.1+): map the latest Direct3D11CaptureFrame to a numpy
-        array. Requires DirectX11 staging texture readback."""
-        raise NotImplementedError('WGC grab skeleton only')
+        return self._wgc.grab()
 
     def close(self):
         try:
@@ -181,13 +171,8 @@ class ScreenCapture:
         except Exception:
             pass
         try:
-            if self._wgc_session is not None:
-                self._wgc_session.close()
-        except Exception:
-            pass
-        try:
-            if self._wgc_frame_pool is not None:
-                self._wgc_frame_pool.close()
+            if self._wgc is not None:
+                self._wgc.close()
         except Exception:
             pass
 
