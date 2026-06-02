@@ -96,19 +96,32 @@
 
 | 后端 | 库 | 速度 | 锁屏下 | 推荐场景 |
 |------|------|------|--------|----------|
-| DXGI Desktop Duplication | `dxcam` | ⚡⚡⚡ | ❌（DWM 阻断） | 解锁状态，最快 |
+| **WGC (Windows.Graphics.Capture)** | `winrt` 3.2.1 interop | ⚡⚡⚡ | **✓**（唯一不需 GDI） | 首选，锁屏仍能抓 |
+| DXGI Desktop Duplication | `dxcam` | ⚡⚡⚡ | ❌（DWM 阻断） | 解锁状态，最快（v2.0 旧首选） |
 | GDI BitBlt (mss) | `mss` | ⚡⚡ | ❌（DWM 阻断） | 解锁状态，DXGI 不可用时 |
 | PIL.ImageGrab | `Pillow` | ⚡ | ❌（DWM 阻断） | 最后 fallback |
 
-**auto 模式**：`dxcam` → `mss` → `PIL.ImageGrab`，运行时探测可用性。
+**auto 模式**：`wgc` → `dxcam` → `mss` → `PIL.ImageGrab`，运行时探测可用性。
 
-**锁屏限制**：DWM 在锁屏时是唯一能访问 GDI/DXGI 的进程。所有这些后端都会 `E_ACCESSDENIED`。
-**双进程架构本身不能解决这个问题**——helper 跑在 user session 也被 DWM 拒。
+**WGC 安装**（agent 机器上需要）：
+```bash
+python -m pip install winrt-runtime \
+  winrt-Windows.Foundation winrt-Windows.Graphics \
+  winrt-Windows.Graphics.Capture winrt-Windows.Graphics.Capture.Interop \
+  winrt-Windows.Graphics.DirectX \
+  winrt-Windows.Graphics.DirectX.Direct3D11 \
+  winrt-Windows.Graphics.DirectX.Direct3D11.Interop \
+  winrt-Windows.Graphics.Imaging \
+  winrt-Windows.Storage winrt-Windows.Storage.Streams
+```
 
-**真解锁屏抓屏**（v2.1+ TODO）：
-- 加 `Windows.Graphics.Capture (UWP)` 后端
-- 需在 helper 里调 `GraphicsCapturePicker`，初始化 COM STA
-- 详见 `capture.py` 的 TODO 注释
+> **重要**：如果全局 pip config 设了 `target = D:\PythonPackages`（本次 workspace 是这样），要重装
+> `winrt-Windows.Graphics.Capture.Interop` 和 `winrt-Windows.Graphics.DirectX.Direct3D11.Interop`：
+> 它们是 namespace 子包，pip install 会报“成功”但 **不创建 `__init__.py`**。需要手动从 wheel 解压到 site-packages。
+> 详见 `D:\self-improving\domains\winrt-install.md`。
+
+**锁屏限制**（其他后端）：DWM 在锁屏时是唯一能访问 GDI/DXGI 的进程。所有这些后端都会 `E_ACCESSDENIED`。
+WGC 不走 DWM，所以是唯一锁屏下能抓的后端。
 
 ## 6. 输入注入
 

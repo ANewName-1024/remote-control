@@ -169,7 +169,8 @@ remote-control/
 | test_e2e_flow.js | 8 | 24 | < 4s |
 | test_delta_encoder.py | 10 | 12 | < 2s |
 | test_mouse_keyboard.py | 30 | 51（含 U1-U6 + CB1-CB7 + D16b/c） | < 5s |
-| **合计** | **119** | **173** | **< 25s** |
+| test_wgc.py | - | 9（WC1-WC9，WC3 仅无 winrt 环境跑） | < 1s |
+| **合计** | **119** | **182** | **< 25s** |
 
 ---
 
@@ -204,6 +205,7 @@ process.env.ACCESS_PASSWORD = PASSWORD;
 | ~~GAP-2~~ | **已修复**：Server 为 `file_request` 也创建 server session | Agent 用 client 传来的 sessionId 发回 `file_chunk`，server 现在能正确路由回 client。原 e2e T07 必须复用 exec session 绕过此问题；修复后新增 T09 用 file_request 自己的 session 验证 file_chunk 路由。 |
 | ~~GAP-3~~ | **已修复**：Agent 实现 `handle_clipboard`（set + get + CF_UNICODETEXT/CF_TEXT fallback），server 显式路由 `clipboard` 从 agent 到 client，client 加"剪贴板" tab UI | `agent/agent.py` `handle_clipboard` + `_on_message` `clipboard` 分支；`server/index.js` agent→client 路由；`server/static/index.html` `clipboardGet`/`clipboardSet` 函数和 panel |
 | GAP-4 | `multer` 500MB 上限与 Deploy 50MB 上限不一致 | 文档化差异，非 bug |
+| ~~GAP-5~~ | **已修复**：`wgc.py` 原来以 380+ 行 ctypes 手动包装 COM 绕弯 IGraphicsCaptureItem*，且 L325 拋 `NotImplementedError` | 重写为 ~240 行用 winrt 官方 interop helper（`create_for_monitor` / `create_direct3d11_device_from_dxgi_device` / `SoftwareBitmap.create_copy_from_surface_async`）。测试套件 63→72 (+9 wgc 测试)，真机上 `ScreenCapture().backend='wgc'`，2560×1440 RGB 帧平均抓取 ~30ms。 |
 
 ---
 
@@ -221,7 +223,7 @@ node test_e2e_flow.js
 
 # 2. 跑 Python 测试（Windows 机器）
 cd agent
-python -m unittest tests.test_delta_encoder tests.test_mouse_keyboard -v
+python -m unittest tests.test_delta_encoder tests.test_mouse_keyboard tests.test_wgc -v
 
 # 3. 一键执行
 cd D:\.openclaw\workspace\projects\devtools\remote-control

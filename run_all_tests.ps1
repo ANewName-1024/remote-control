@@ -50,12 +50,12 @@ Write-Host "========================================" -ForegroundColor Cyan
 $python = (Get-Command python -ErrorAction SilentlyContinue)
 if ($python) {
     Write-Host ""
-    Write-Host ">>> Running: Python tests (Delta Encoder + Mouse/Keyboard)" -ForegroundColor Yellow
+    Write-Host ">>> Running: Python tests (Delta Encoder + Mouse/Keyboard + WGC)" -ForegroundColor Yellow
     Push-Location (Join-Path $ScriptDir 'agent')
     try {
-        $p = Start-Process -FilePath 'python' -ArgumentList @('-m', 'unittest', 'tests.test_delta_encoder', 'tests.test_mouse_keyboard', '-v') -NoNewWindow -Wait -PassThru
+        $p = Start-Process -FilePath 'python' -ArgumentList @('-m', 'unittest', 'tests.test_delta_encoder', 'tests.test_mouse_keyboard', 'tests.test_wgc', '-v') -NoNewWindow -Wait -PassThru
         $results += [PSCustomObject]@{
-            Name = 'Python unittest (delta_encoder 12 + mouse_keyboard 51 = 63 tests)'
+            Name = 'Python unittest (delta_encoder 12 + mouse_keyboard 51 + wgc 9 = 72 tests)'
             ExitCode = $p.ExitCode
         }
         if ($p.ExitCode -ne 0) {
