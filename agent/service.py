@@ -498,26 +498,41 @@ def run(config_dir: str = None):
 
     threading.Thread(target=spawn_loop, name='helper-spawner', daemon=True).start()
 
-    # Main loop: read frames from pipe, forward to ... where? The original
-    # agent.py had a WebSocket + DeltaScreenCapture. For now we just log
-    # frame statistics. A future PR will wire WebSocket forwarding.
+    # Main loop: spin up the WS bridge so frames flow to the relay.
+    # We keep the same frame_count + periodic-log behavior for visibility.
+    bridge = None
+    ws_url = os.environ.get('WS_URL')
+    agent_id = os.environ.get('AGENT_ID', socket.gethostname() if False else 'agent-' + os.environ.get('COMPUTERNAME', 'local'))
+    secret = os.environ.get('AGENT_SECRET', '')
+    if ws_url and secret:
+        from . import ws_bridge as _wsb
+        bridge = _wsb.WSBridge(pipes, ws_url, agent_id, secret)
+        bridge.start()
+        log.info(f'WS bridge starting for {agent_id} -> {ws_url}')
+    else:
+        log.warning('WS_URL or AGENT_SECRET not set; bridge disabled (helper will still capture, but no remote client)')
+
     frame_count = 0
     last_log = time.time()
     try:
         while pipes.running:
-            frame = pipes.read_frame(timeout_ms=100)
-            if frame is not None:
-                frame_count += 1
-                # In the real implementation: pipe this into DeltaScreenCapture
-                # then send encoded delta via WebSocket.
+            # Frame queue is drained by the WS bridge's frame_pump
+            # thread. We just keep a health check here.
             now = time.time()
             if now - last_log >= 30:
-                log.info(f'frames received: {frame_count}')
+                bc = ', '.join(f'{t.name}={t.is_alive()}' for t in pipes.threads)
+                bridge_stats = (
+                    f' frames_sent={bridge.frames_sent} bytes_sent={bridge.bytes_sent}'
+                    if bridge else ' bridge=off'
+                )
+                log.info(f'service heartbeat: {bc}{bridge_stats}')
                 last_log = now
-            time.sleep(0.01)
+            time.sleep(0.5)
     except KeyboardInterrupt:
         log.info('service interrupted')
     finally:
+        if bridge:
+            bridge.stop()
         pipes.stop()
         if helper_proc:
             try: helper_proc.terminate()

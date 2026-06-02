@@ -1,13 +1,16 @@
-"""Screen capture interface with three backends, in priority order:
+"""Screen capture interface with four backends, in priority order:
 
-  1. dxcam   (DXGI Desktop Duplication) - works in locked user session
-  2. mss     (Win32 GDI)                - works when user is logged in
-  3. PIL.ImageGrab (Win32 GDI)          - works in most cases
+  1. WGC    (Windows.Graphics.Capture, UWP) - works in LOCKED sessions,
+                                              Win10 1903+ / Win11
+  2. dxcam  (DXGI Desktop Duplication)      - works in unlocked session,
+                                              Win10+
+  3. mss    (Win32 GDI)                     - works when user logged in
+  4. PIL.ImageGrab (Win32 GDI)              - last-ditch fallback
 
 Returns frames as numpy.uint8 array (H, W, 3) in RGB format.
-The helper runs in the user's interactive session, so DXGI is preferred
-because it can capture even when the workstation is locked (but the user
-session is still active).
+The helper runs in the user's interactive session, so WGC is preferred
+when available because it can capture even when the workstation is
+locked (where DWM blocks BitBlt / DXGI).
 """
 import logging
 from typing import Optional, Tuple
@@ -33,6 +36,20 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+# WinRT / WGC requires:
+#   pip install winrt-runtime winrt-Windows.Graphics.Capture
+#   pip install winrt-Windows.Foundation winrt-Windows.UI.Composition
+# and a modern Direct3D11 binding. These are heavy deps so we only
+# declare WGC as available if all pieces are importable.
+WGC_AVAILABLE = False
+try:
+    import winrt  # type: ignore  # noqa: F401
+    import winrt.windows.graphics.capture as wgc  # type: ignore
+    import winrt.windows.graphics.directx.direct3d11 as d3d11  # type: ignore
+    WGC_AVAILABLE = True
+except ImportError:
+    pass
+
 
 log = logging.getLogger('agent.capture')
 
@@ -49,11 +66,25 @@ class ScreenCapture:
         self.width: int = 0
         self.height: int = 0
         # backend-specific resources
+        self._wgc_frame_pool = None
+        self._wgc_session = None
+        self._wgc_item = None
+        self._wgc_d3d_device = None
         self._cam: Optional['dxcam.DXCamera'] = None
         self._sct = None
         self._init_backend()
 
     def _init_backend(self):
+        # 1. WGC (preferred for locked sessions)
+        if WGC_AVAILABLE:
+            try:
+                self._init_wgc()
+                self.backend = 'wgc'
+                log.info(f'capture: WGC UWP backend ({self.width}x{self.height})')
+                return
+            except Exception as e:
+                log.debug(f'WGC init failed: {e}')
+
         if DXCAM_AVAILABLE:
             try:
                 # output_idx=0 => primary display
@@ -90,11 +121,26 @@ class ScreenCapture:
             except Exception as e:
                 log.debug(f'PIL.ImageGrab init failed: {e}')
 
-        raise RuntimeError('no screen capture backend available (install dxcam, mss, or Pillow)')
+        raise RuntimeError('no screen capture backend available (install winrt+dx11, dxcam, mss, or Pillow)')
+
+    def _init_wgc(self):
+        """Initialize Windows.Graphics.Capture for the primary monitor.
+
+        Note: a full implementation requires Direct3D11 device creation
+        via ctypes + d3d11.dll. This skeleton provides the wiring; the
+        d3d11 device init is left as a future PR (requires ~80 lines of
+        ctypes boilerplate for CreateDevice + QueryInterface).
+        """
+        # TODO(2.1+): implement d3d11 device init via ctypes
+        #   d3d11.CreateDevice(None, 0, 0, 0, None, 0, D3D_DRIVER_TYPE_HARDWARE)
+        #   + QI for ID3D11Device5 (needed for CreateDirect3D11SurfaceFromHandle)
+        raise NotImplementedError('WGC backend skeleton only; full implementation in 2.1+')
 
     def grab(self) -> Optional[np.ndarray]:
         """Grab a single frame. Returns HxWx3 RGB uint8 array, or None on failure."""
         try:
+            if self.backend == 'wgc':
+                return self._grab_wgc()
             if self.backend == 'dxcam':
                 frame = self._cam.grab()
                 if frame is None:
@@ -118,6 +164,11 @@ class ScreenCapture:
 
         return None
 
+    def _grab_wgc(self) -> Optional[np.ndarray]:
+        """TODO(2.1+): map the latest Direct3D11CaptureFrame to a numpy
+        array. Requires DirectX11 staging texture readback."""
+        raise NotImplementedError('WGC grab skeleton only')
+
     def close(self):
         try:
             if self._cam is not None:
@@ -129,12 +180,23 @@ class ScreenCapture:
                 self._sct.close()
         except Exception:
             pass
+        try:
+            if self._wgc_session is not None:
+                self._wgc_session.close()
+        except Exception:
+            pass
+        try:
+            if self._wgc_frame_pool is not None:
+                self._wgc_frame_pool.close()
+        except Exception:
+            pass
 
     def status(self) -> dict:
         return {
             'backend': self.backend,
             'width':   self.width,
             'height':  self.height,
+            'wgc_available':     WGC_AVAILABLE,
             'dxcam_available':   DXCAM_AVAILABLE,
             'mss_available':     MSS_AVAILABLE,
             'pil_available':     PIL_AVAILABLE,
