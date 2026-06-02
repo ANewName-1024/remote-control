@@ -13,11 +13,21 @@ import threading
 from typing import List, Tuple, Optional, Dict, Any
 
 try:
-    from PIL import Image, ImageGrab
+    from PIL import Image
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
     logging.error("PIL not available!")
+
+# mss is preferred for screen capture — uses DXGI on Windows which works
+# in more environments than PIL.ImageGrab (which goes through GDI and
+# can fail with "screen grab failed" on headless / RDP / locked desktops).
+try:
+    import mss
+    MSS_AVAILABLE = True
+except ImportError:
+    MSS_AVAILABLE = False
+    logging.warning("mss not available, will fall back to PIL.ImageGrab")
 
 BLOCK_SIZE = 64   # pixels per block
 MAX_REGIONS = 20  # max regions per delta frame
@@ -51,7 +61,7 @@ class DeltaScreenCapture:
     def capture_and_encode(self) -> Optional[Dict[str, Any]]:
         """Capture screen and encode as keyframe or delta."""
         try:
-            img = ImageGrab.grab()
+            img = self._grab()
             w, h = img.size
             rgb = img.convert('RGB').tobytes('raw', 'RGB')
         except Exception as e:
@@ -76,6 +86,23 @@ class DeltaScreenCapture:
             self.last_rgb = rgb
             return result
     
+    def _grab(self) -> Image.Image:
+        """Grab the screen as a PIL Image. Prefers mss (DXGI) because
+        PIL.ImageGrab.grab() can fail with 'screen grab failed' on
+        Windows even when a real display is available (observed on
+        2560x1440 + Windows 11 23H2)."""
+        if MSS_AVAILABLE:
+            try:
+                with mss.mss() as sct:
+                    monitor = sct.monitors[0]
+                    shot = sct.grab(monitor)
+                    # mss returns BGRA; convert to RGB PIL Image.
+                    return Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
+            except Exception as e:
+                logging.debug(f"mss grab failed, falling back to ImageGrab: {e}")
+        from PIL import ImageGrab
+        return ImageGrab.grab()
+
     def _hash_frame(self, rgb: bytes) -> bytes:
         """Quick hash of frame using struct sampling."""
         # Sample every 100th byte for quick comparison
