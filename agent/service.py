@@ -17,6 +17,7 @@ The service and helper are typically the same Python entry point,
 selected by --mode=service vs --mode=helper.
 """
 import os
+import queue
 import sys
 import time
 import json
@@ -271,6 +272,8 @@ class PipeServer:
         self.cmd_lock  = threading.Lock()
         self.frame_lock = threading.Lock()
         self.on_hello = None  # callback(hello_dict) when helper sends HELLO
+        self.frame_queue = queue.Queue(maxsize=64)
+        self.frame_reader_thread = None
 
     def _pipe_thread(self, pipe_name, accept):
         import win32pipe  # type: ignore
@@ -322,13 +325,34 @@ class PipeServer:
             t.start()
             self.threads.append(t)
 
+    def drain_frames(self) -> list:
+        """Return all currently buffered frames (non-blocking)."""
+        out = []
+        try:
+            while True:
+                out.append(self.frame_queue.get_nowait())
+        except queue.Empty:
+            pass
+        return out
+
+    def send_frame_to_helper(self, data: bytes) -> bool:
+        """Send data to the helper via the cmd pipe (helper does not
+        expose a service->helper frame channel in v2.0; service uses
+        the cmd pipe for everything)."""
+        return self.send_cmd({'type': 'forward', 'data_b64': __import__('base64').b64encode(data).decode('ascii')})
+
     def _on_connection(self, kind, handle):
         if kind == 'cmd':
             # Run in a thread to handle messages from helper
             t = threading.Thread(target=self._cmd_session, args=(handle,),
                                  name='cmd-session', daemon=True)
             t.start()
-        # frame: we just close the handle since the helper writes to it
+        else:  # frame
+            # Dedicated reader thread: blocking ReadFile loop. Pushes
+            # frames onto self.frame_queue for drain_frames() consumers.
+            t = threading.Thread(target=self._frame_reader, args=(handle,),
+                                 name='frame-reader', daemon=True)
+            t.start()
         # and we read directly via ReadFile. But for now we treat the pipe
         # as duplex and let the frame-sender thread on the helper side
         # close it from the other end when it exits.
@@ -389,26 +413,47 @@ class PipeServer:
                 return False
 
     def read_frame(self, timeout_ms: int = 100) -> Optional[bytes]:
-        """Try to read a frame from the frame pipe. Non-blocking.
+        """Return the next buffered frame, or None if queue is empty.
 
-        TODO(perf): on a busy service this should be a dedicated thread
-        doing a blocking ReadFile loop, not polled from the main loop.
-        For now we just attempt a 1-byte read and only continue if data
-        is available.
+        The actual reading from the pipe is done by a dedicated thread
+        (see _frame_reader) that blocking-ReadFile's envelopes and
+        pushes to self.frame_queue. This method is a non-blocking poll.
+        """
+        try:
+            return self.frame_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _frame_reader(self, handle):
+        """Dedicated thread: blocking-ReadFile loop on the frame pipe.
+
+        Reads length-prefixed envelopes via ipc.read_envelope and pushes
+        the bodies onto frame_queue. Closes the handle on exit so the
+        OS can pair the next helper with a fresh pipe.
         """
         import win32file  # type: ignore
-        import win32pipe  # type: ignore
-        with self.frame_lock:
-            if not self.frame_conn:
-                return None
+        log.debug('frame reader: started')
+        try:
+            while self.running:
+                data = ipc.read_envelope(handle)
+                if data is None:
+                    log.info('frame reader: helper disconnected')
+                    break
+                try:
+                    self.frame_queue.put(data, timeout=1.0)
+                except queue.Full:
+                    log.warning('frame reader: queue full, dropping frame')
+        except Exception as e:
+            log.warning(f'frame reader: error {e}')
+        finally:
             try:
-                avail, _, _ = win32pipe.PeekNamedPipe(self.frame_conn, 0)
-            except Exception as e:
-                log.debug(f'read_frame: PeekNamedPipe: {e}')
-                return None
-            if avail < 4:
-                return None
-            return ipc.read_envelope(self.frame_conn)
+                win32file.CloseHandle(handle)
+            except Exception:
+                pass
+            with self.frame_lock:
+                if self.frame_conn is handle:
+                    self.frame_conn = None
+            log.debug('frame reader: exited')
 
     def stop(self):
         self.running = False
