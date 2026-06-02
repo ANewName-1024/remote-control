@@ -46,6 +46,16 @@ jobs:
           cd ..
           node test_e2e_flow.js
 
+      - name: Static Deploy smoke tests
+        run: |
+          cd ..
+          node smoke_test.js
+
+      - name: Upload (multer 2.x) tests
+        run: |
+          cd ..
+          node upload_test.js
+
   agent-tests:
     name: Agent (Python)
     runs-on: ubuntu-latest
