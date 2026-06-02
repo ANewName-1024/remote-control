@@ -35,11 +35,11 @@ def _try_import_wgc():
     Returns (module, is_mock_mode):
       - is_mock_mode=True  : winrt pieces were unavailable; module is real
                               but WGC_AVAILABLE is False (or the module
-                              itself failed to import — we skip).
+                              itself failed to import 閳?we skip).
       - is_mock_mode=False : module loaded with WGC_AVAILABLE=True
     """
     try:
-        import wgc
+        import agent.wgc as wgc
         return wgc, False
     except Exception:
         return None, True
@@ -52,7 +52,7 @@ class TestWgcModuleSurface(unittest.TestCase):
         """WC1: wgc.py is importable even on platforms without winrt."""
         # First try real import (Windows with winrt installed)
         try:
-            import wgc
+            import agent.wgc as wgc
             # OK, real module
             self.assertTrue(hasattr(wgc, 'WgcCapture'))
             self.assertTrue(hasattr(wgc, 'WGC_AVAILABLE'))
@@ -63,7 +63,7 @@ class TestWgcModuleSurface(unittest.TestCase):
 
     def test_WC2_wgc_available_flag_type(self):
         """WC2: WGC_AVAILABLE is a bool regardless of winrt presence."""
-        import wgc
+        import agent.wgc as wgc
         self.assertIsInstance(wgc.WGC_AVAILABLE, bool)
 
 
@@ -72,7 +72,7 @@ class TestWgcCaptureConstruction(unittest.TestCase):
 
     def test_WC3_raises_when_unavailable(self):
         """WC3: RuntimeError with helpful install command when WGC_AVAILABLE=False."""
-        import wgc
+        import agent.wgc as wgc
         if wgc.WGC_AVAILABLE:
             self.skipTest('winrt is installed; cannot test missing-deps path')
         with self.assertRaises(RuntimeError) as ctx:
@@ -93,17 +93,17 @@ class TestWgcGrabAndFrameReadback(unittest.TestCase):
     """
 
     def setUp(self):
-        import wgc
+        import agent.wgc as wgc
         if not wgc.WGC_AVAILABLE:
             self.skipTest('winrt pieces not available; skipping WGC frame-readback tests')
 
     def test_WC4_grab_returns_none_when_no_frame(self):
         """WC4: try_get_next_frame() returns None -> grab() returns None."""
-        with patch('wgc._create_d3d11_device') as mock_d3d, \
-             patch('wgc._get_primary_monitor_handle') as mock_hmon, \
-             patch('wgc.d3d_io.create_direct3d11_device_from_dxgi_device') as mock_wrap, \
-             patch('wgc.cap_io.create_for_monitor') as mock_cap_item, \
-             patch('wgc.wgc_mod.Direct3D11CaptureFramePool') as mock_fp_cls:
+        with patch('agent.wgc._create_d3d11_device') as mock_d3d, \
+             patch('agent.wgc._get_primary_monitor_handle') as mock_hmon, \
+             patch('agent.wgc.d3d_io.create_direct3d11_device_from_dxgi_device') as mock_wrap, \
+             patch('agent.wgc.cap_io.create_for_monitor') as mock_cap_item, \
+             patch('agent.wgc.wgc_mod.Direct3D11CaptureFramePool') as mock_fp_cls:
             mock_d3d.return_value = ctypes.c_void_p(0x1234)
             mock_hmon.return_value = 0x10001
             mock_wrap.return_value = MagicMock(name='IDirect3DDevice')
@@ -115,7 +115,7 @@ class TestWgcGrabAndFrameReadback(unittest.TestCase):
             mock_fp.try_get_next_frame.return_value = None  # no frame yet
             mock_fp_cls.create_free_threaded.return_value = mock_fp
 
-            import wgc as wm
+            import agent.wgc  as wm
             cap = wm.WgcCapture()
             result = cap.grab()
             self.assertIsNone(result)
@@ -124,7 +124,7 @@ class TestWgcGrabAndFrameReadback(unittest.TestCase):
     def test_WC5_grab_returns_rgb_array(self):
         """WC5: grab() returns HxWx3 RGB uint8 when SoftwareBitmap has data."""
         w, h = 4, 3
-        # 12 pixels × 4 channels (BGRA) — use distinct colors per channel
+        # 12 pixels 鑴?4 channels (BGRA) 閳?use distinct colors per channel
         # to verify the BGRA->RGB swap.
         bgra = bytearray()
         for row in range(h):
@@ -133,13 +133,13 @@ class TestWgcGrabAndFrameReadback(unittest.TestCase):
                 bgra.extend((b, g, r, a))
         bgra_bytes = bytes(bgra)
 
-        with patch('wgc._create_d3d11_device') as mock_d3d, \
-             patch('wgc._get_primary_monitor_handle') as mock_hmon, \
-             patch('wgc.d3d_io.create_direct3d11_device_from_dxgi_device') as mock_wrap, \
-             patch('wgc.cap_io.create_for_monitor') as mock_cap_item, \
-             patch('wgc.wgc_mod.Direct3D11CaptureFramePool') as mock_fp_cls, \
-             patch('wgc.img_mod.SoftwareBitmap') as mock_sb, \
-             patch('wgc.streams_mod.Buffer') as mock_buf:
+        with patch('agent.wgc._create_d3d11_device') as mock_d3d, \
+             patch('agent.wgc._get_primary_monitor_handle') as mock_hmon, \
+             patch('agent.wgc.d3d_io.create_direct3d11_device_from_dxgi_device') as mock_wrap, \
+             patch('agent.wgc.cap_io.create_for_monitor') as mock_cap_item, \
+             patch('agent.wgc.wgc_mod.Direct3D11CaptureFramePool') as mock_fp_cls, \
+             patch('agent.wgc.img_mod.SoftwareBitmap') as mock_sb, \
+             patch('agent.wgc.streams_mod.Buffer') as mock_buf:
             mock_d3d.return_value = ctypes.c_void_p(0x1234)
             mock_hmon.return_value = 0x10001
             mock_wrap.return_value = MagicMock(name='IDirect3DDevice')
@@ -178,7 +178,7 @@ class TestWgcGrabAndFrameReadback(unittest.TestCase):
             fake_buf = FakeBuf(bgra_bytes)
             mock_buf.return_value = fake_buf
 
-            import wgc as wm
+            import agent.wgc  as wm
             cap = wm.WgcCapture()
             result = cap.grab()
             self.assertIsNotNone(result)
@@ -223,17 +223,17 @@ class TestWgcCloseLifecycle(unittest.TestCase):
     """WC6: close() releases session, frame_pool, d3d11 device."""
 
     def setUp(self):
-        import wgc
+        import agent.wgc as wgc
         if not wgc.WGC_AVAILABLE:
             self.skipTest('winrt pieces not available; skipping close-path tests')
 
     def test_WC6_close_releases_all_resources(self):
         """WC6: close() calls close() on session+frame_pool + Release on D3D11."""
-        with patch('wgc._create_d3d11_device') as mock_d3d, \
-             patch('wgc._get_primary_monitor_handle') as mock_hmon, \
-             patch('wgc.d3d_io.create_direct3d11_device_from_dxgi_device'), \
-             patch('wgc.cap_io.create_for_monitor') as mock_cap_item, \
-             patch('wgc.wgc_mod.Direct3D11CaptureFramePool') as mock_fp_cls:
+        with patch('agent.wgc._create_d3d11_device') as mock_d3d, \
+             patch('agent.wgc._get_primary_monitor_handle') as mock_hmon, \
+             patch('agent.wgc.d3d_io.create_direct3d11_device_from_dxgi_device'), \
+             patch('agent.wgc.cap_io.create_for_monitor') as mock_cap_item, \
+             patch('agent.wgc.wgc_mod.Direct3D11CaptureFramePool') as mock_fp_cls:
             mock_d3d.return_value = ctypes.c_void_p(0x1234)
             mock_hmon.return_value = 0x10001  # integer hmonitor (so #x format works)
             mock_item = MagicMock()
@@ -243,7 +243,7 @@ class TestWgcCloseLifecycle(unittest.TestCase):
             mock_fp = MagicMock()
             mock_fp_cls.create_free_threaded.return_value = mock_fp
 
-            import wgc as wm
+            import agent.wgc  as wm
             cap = wm.WgcCapture()
             cap.close()
 
@@ -260,7 +260,7 @@ class TestWgcLowLevelHelpers(unittest.TestCase):
     """WC7, WC8: ctypes helpers (don't require winrt)."""
 
     def setUp(self):
-        import wgc
+        import agent.wgc as wgc
         if not wgc.WGC_AVAILABLE:
             # These helpers exist even without winrt; they only need ctypes
             # and a real user32.dll. On non-Windows they still import
@@ -269,7 +269,7 @@ class TestWgcLowLevelHelpers(unittest.TestCase):
 
     def test_WC7_create_d3d11_device_returns_c_void_p(self):
         """WC7: _create_d3d11_device returns a c_void_p with non-zero value."""
-        import wgc
+        import agent.wgc as wgc
         if not hasattr(wgc, '_create_d3d11_device'):
             self.skipTest('wgc missing _create_d3d11_device (unexpected)')
         try:
@@ -284,7 +284,7 @@ class TestWgcLowLevelHelpers(unittest.TestCase):
 
     def test_WC8_get_primary_monitor_returns_nonzero(self):
         """WC8: _get_primary_monitor_handle returns non-zero hmonitor."""
-        import wgc
+        import agent.wgc as wgc
         if not hasattr(wgc, '_get_primary_monitor_handle'):
             self.skipTest('wgc missing _get_primary_monitor_handle (unexpected)')
         try:
