@@ -6,5 +6,9 @@ pyautogui>=0.9.54
 pywin32>=300
 psutil>=5.0
 
+# DXGI Desktop Duplication capture (preferred for locked-user-session capture)
+# Falls back to mss / PIL.ImageGrab if unavailable.
+dxcam>=0.3
+
 # PyInstaller (for building .exe)
 pyinstaller>=6.0
