@@ -117,7 +117,7 @@ class TestDeltaEncoder(unittest.TestCase):
 
     # ---------- T05: Binary big-endian format ----------
     def test_T05_binary_format(self):
-        """E5: delta data decodes as big-endian >HHHH header + >I size + JPEG."""
+        """E5: delta data decodes as [>I size][JPEG][>I size][JPEG]... (matches web client)."""
         from PIL import Image
         # Build a 1-block change. Set last_rgb so _find_changed_blocks has a previous frame.
         prev_img = Image.new('RGB', (self.W, self.H), (0, 0, 0))
@@ -134,18 +134,20 @@ class TestDeltaEncoder(unittest.TestCase):
             self.skipTest("no change detected (encoder bug)")
         # Decode binary payload
         decoded = base64.b64decode(result['data'])
-        # First block header: >HHHH x, y, w, h
-        x, y, w, h = struct.unpack('>HHHH', decoded[:8])
+        # First chunk: >I size, then JPEG bytes
+        size = struct.unpack('>I', decoded[:4])[0]
+        self.assertGreater(size, 0, "JPEG size should be positive")
+        self.assertLessEqual(size, len(decoded) - 4, f"size {size} should fit in {len(decoded)-4} remaining bytes")
+        # JPEG magic
+        jpeg_data = decoded[4:4 + size]
+        self.assertTrue(jpeg_data[:3] == b'\xff\xd8\xff', "should be valid JPEG")
+        # x/y/w/h come from msg['regions'] (separate JSON array)
+        self.assertEqual(len(result['regions']), 1, "should have 1 region")
+        x, y, w, h = result['regions'][0]
         self.assertGreaterEqual(x, 0, "x should be non-negative")
         self.assertGreaterEqual(y, 0, "y should be non-negative")
         self.assertGreater(w, 0, "w should be positive")
         self.assertGreater(h, 0, "h should be positive")
-        # Then >I size
-        size = struct.unpack('>I', decoded[8:12])[0]
-        self.assertEqual(size, len(decoded) - 12, f"JPEG size {size} should match remaining bytes")
-        # JPEG magic
-        jpeg_data = decoded[12:12 + size]
-        self.assertTrue(jpeg_data[:3] == b'\xff\xd8\xff', "should be valid JPEG")
 
     # ---------- T06: Keyframe interval (3s) ----------
     def test_T06_keyframe_interval(self):

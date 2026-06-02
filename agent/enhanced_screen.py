@@ -125,30 +125,33 @@ class DeltaScreenCapture:
         }
     
     def _encode_delta(self, img: Image.Image, rgb: bytes, w: int, h: int) -> Optional[Dict[str, Any]]:
-        """Encode only changed blocks as JPEG regions."""
+        """Encode only changed blocks as JPEG regions.
+
+        Binary pixel_data format (matches web client renderDeltaFrame):
+            [4-byte BE size][JPEG bytes] [4-byte BE size][JPEG bytes] ...
+        The web client reads x/y/w/h from msg.regions (separate JSON array)
+        and uses the BE size to slice each region JPEG.
+        """
         # Find changed blocks
         blocks = self._find_changed_blocks(self.last_rgb, rgb, w, h)
-        
+
         if not blocks:
             return None
-        
+
         # Extract and encode each block as JPEG
         region_list = []
         pixel_data = b''
-        
+
         for (x, y, bw, bh) in blocks[:MAX_REGIONS]:
-            pass  # values from _merge_blocks are already correct
-            
             region = img.crop((x, y, x + bw, y + bh))
             buf = io.BytesIO()
             region.save(buf, format='JPEG', quality=65)
             region_jpg = buf.getvalue()
-            
+
             region_list.append([x, y, bw, bh])
-            pixel_data += struct.pack('>HHHH', x, y, bw, bh)
             pixel_data += struct.pack('>I', len(region_jpg))
             pixel_data += region_jpg
-        
+
         import base64
         return {
             'type': 'screen',

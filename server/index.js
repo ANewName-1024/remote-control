@@ -406,16 +406,27 @@ wss.on('connection', (ws, req) => {
                 
                 // Handle screen frame
                 if (msg.type === 'screen') {
-                    
-                    // Relay to all connected clients viewing this agent
+
+                    // Relay to all connected clients viewing this agent.
+                    // The agent's screen message may be a full keyframe
+                    // ({fmt:'kf', data:base64(jpeg), w, h}) or a delta
+                    // ({fmt:'df', data:base64(pixel_data), regions:[[x,y,w,h],...]}).
+                    // Forward all fields; the browser client decides how to render.
+                    const relay = {
+                        type: 'screen',
+                        data: msg.data,
+                        quality: msg.quality,
+                        timestamp: msg.timestamp,
+                        ...(msg.fmt     !== undefined && { fmt: msg.fmt }),
+                        ...(msg.regions !== undefined && { regions: msg.regions }),
+                        ...(msg.w       !== undefined && { w: msg.w }),
+                        ...(msg.h       !== undefined && { h: msg.h }),
+                        ...(msg.ts      !== undefined && { src_ts: msg.ts }),
+                        ...(msg.seq     !== undefined && { seq: msg.seq }),
+                    };
                     CLIENTS.forEach((client) => {
                         if (client.agentId === agentId && client.ws.readyState === 1) {
-                            client.ws.send(JSON.stringify({
-                                type: 'screen',
-                                data: msg.data,
-                                quality: msg.quality,
-                                timestamp: msg.timestamp
-                            }));
+                            client.ws.send(JSON.stringify(relay));
                         }
                     });
                     return;

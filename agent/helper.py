@@ -33,6 +33,7 @@ if _PARENT not in sys.path:
 from agent import protocol as ipc
 from agent import capture as cap
 from agent import input_inject as inp
+from agent.enhanced_screen import DeltaScreenCapture
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,15 +74,31 @@ def connect_pipe(name: str, retries: int = 30, delay: float = 0.5):
 
 
 def frame_sender(stop_event: threading.Event):
-    """Background thread: grab frames and send them to the service frame pipe."""
+    """Background thread: grab frames, run through DeltaScreenCapture,
+    send encoded JPEGs (keyframe or delta) to the service frame pipe.
+
+    Frame envelope (16-byte header + JSON body):
+      [4 bytes length BE] [4 bytes seq BE] [8 bytes ts BE] [JSON utf-8]
+
+    JSON body is a DeltaScreenCapture message dict:
+      keyframe: {type:'screen', fmt:'kf', data:base64(jpeg), w, h, ts}
+      delta:    {type:'screen', fmt:'df', data:base64(pixel_data),
+                 regions:[[x,y,w,h],...], w, h, ts, blocks:N}
+      skip:     (not sent - delta has no changes)
+
+    The service just forwards the message dict over WS to the VPS relay.
+    """
     sc = cap.ScreenCapture()
     log.info(f'frame_sender: backend={sc.backend} size={sc.width}x{sc.height}')
 
-    # Open frame pipe (write only)
     import win32file  # type: ignore
     import win32pipe  # type: ignore
     GENERIC_WRITE = win32file.GENERIC_WRITE
     OPEN_EXISTING = win32file.OPEN_EXISTING
+
+    delta = DeltaScreenCapture(sc.width, sc.height)
+
+    # Open frame pipe (write only)
     handle = None
     while handle is None and not stop_event.is_set():
         try:
@@ -96,6 +113,7 @@ def frame_sender(stop_event: threading.Event):
             time.sleep(0.5)
     if handle is None:
         log.error('frame_sender: failed to open frame pipe')
+        sc.close()
         return
 
     log.info('frame_sender: connected to frame pipe')
@@ -103,20 +121,36 @@ def frame_sender(stop_event: threading.Event):
     interval = 1.0 / fps_target
 
     seq = 0
+    kf_count = 0
+    df_count = 0
+    skip_count = 0
     try:
         while not stop_event.is_set():
             t0 = time.time()
             arr = sc.grab()
             if arr is not None:
-                # Frame is RGB uint8 HxWx3. We send the raw bytes; the service
-                # decodes using its own DeltaScreenCapture (same dimensions).
-                raw = arr.tobytes()
-                # Wrap with a small frame header so the service can
-                # distinguish successive frames even if they merge.
-                # Format: [4-byte length][seq BE u32][ts BE u64][raw bytes]
-                header = struct.pack('>IQ', seq, int(t0 * 1000))
-                ipc.send_frame(handle, header + raw)
-                seq += 1
+                # Convert numpy RGB to PIL Image for DeltaScreenCapture.
+                from PIL import Image
+                img = Image.fromarray(arr)
+                msg = delta.capture_and_encode()
+                if msg is None:
+                    skip_count += 1
+                else:
+                    body = json.dumps(msg, ensure_ascii=False).encode('utf-8')
+                    # 16-byte header: 4 length, 4 seq, 8 ts
+                    header = struct.pack('>IIQ',
+                                         len(body),
+                                         seq,
+                                         int(t0 * 1000))
+                    ipc.send_frame(handle, header + body)
+                    if msg.get('fmt') == 'kf':
+                        kf_count += 1
+                    else:
+                        df_count += 1
+                    seq += 1
+                    if seq % 50 == 0:
+                        log.info(f'frame_sender stats: seq={seq} kf={kf_count} '
+                                 f'df={df_count} skip={skip_count}')
             elapsed = time.time() - t0
             time.sleep(max(0, interval - elapsed))
     except Exception as e:

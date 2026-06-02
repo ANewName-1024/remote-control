@@ -175,13 +175,10 @@ class WSBridge:
     # ---- helper -> server ----
 
     def _frame_pump(self) -> None:
-        """Drain frames from the helper (via the frame queue) and send as
-        `screen` messages over WS.
-
-        The helper's frame envelope is `[4-byte length][body]` where
-        body = `[4-byte seq][8-byte ts][RGB raw]`. We forward the body
-        base64-encoded inside the `screen` message so the server can
-        decode it for the browser client.
+        """Drain frames from the helper (via the frame queue) and forward
+        to the server. The helper's frame_sender runs frames through
+        DeltaScreenCapture and sends a JSON msg dict per frame (with
+        `fmt='kf'` or `fmt='df'`); we forward the dict verbatim.
         """
         while not self._stop.is_set():
             time.sleep(0.05)
@@ -189,20 +186,21 @@ class WSBridge:
                 continue
             for body in self.pipes.drain_frames():
                 try:
-                    if len(body) < 12:
+                    if len(body) < 16:
                         continue
-                    seq, ts_ms = struct.unpack('>IQ', body[:12])
-                    rgb = body[12:]
-                    self._send({
-                        'type': 'screen',
-                        'seq': int(seq),
-                        'ts_ms': int(ts_ms),
-                        'data': base64.b64encode(rgb).decode('ascii'),
-                        'quality': 70,
-                        'timestamp': int(time.time() * 1000),
-                    })
+                    # 16-byte header: 4 length, 4 seq, 8 ts
+                    body_len, seq, ts_ms = struct.unpack('>IIQ', body[:16])
+                    if len(body) < 16 + body_len:
+                        continue
+                    payload = body[16:16 + body_len]
+                    msg = json.loads(payload.decode('utf-8'))
+                    if msg.get('type') != 'screen':
+                        continue
+                    # Pass through helper-generated msg; just add server-side ts
+                    msg['server_ts_ms'] = int(time.time() * 1000)
+                    self._send(msg)
                     self.frames_sent += 1
-                    self.bytes_sent += len(rgb)
+                    self.bytes_sent += body_len
                 except Exception as e:
                     log.warning(f'frame_pump: send failed: {e}')
 
