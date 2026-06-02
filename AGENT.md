@@ -1,205 +1,177 @@
-# Agent 使用说明 - 远程控制系统
+# AGENT.md - Windows 端 Agent
 
-> 本文件供 AI Agent 阅读，帮助快速理解、修改和调试本仓库代码。
+> 自托管的 Windows 远程控制 Agent（v2.x dual-process 架构）。
+> 配套：**server** = Node 中继（部署在 VPS），**client** = 浏览器 / 移动 App。
 
----
+## 1. 架构总览（v2.0+）
 
-## 一、项目概述
-**功能：** 从浏览器（安卓 / PC）远程控制 Windows 电脑，无需端口映射，Agent 主动连接云服务器。
-
-**三组件架构：**
 ```
-移动端浏览器 ──HTTPS/WSS──► VPS Node.js 中继 ──WS──► Windows Python Agent
-                                          │
-                                          ▼
-                                    Web 控制台
-                                    (static/)
-```
-
-**Agent ID 与 Secret 认证方式** — 每次连接需要输入 Agent 分配的 UUID 和密钥。
-
----
-
-## 二、关键文件说明
-
-### 2.1 服务器端 `server/`
-
-| 文件 | 作用 | 关键点 |
-|------|------|--------|
-| `index.js` | Node.js WebSocket 中继主入口 | 路由 agent ⇄ client 消息；静态文件服务；文件上传 / 部署接口 |
-| `static/index.html` | **Web 控制台**（桌面端） | 原生 HTML+JS，非 Flutter |
-| `package.json` | 依赖 | `ws`、`express`、`multer@^2`、`uuid` |
-
-**服务器端口：** 默认 `21112`，由环境变量 `PORT` 控制。
-**访问密码：** 环境变量 `ACCESS_PASSWORD`。
-**静态文件：** `static/` 目录通过 `express.static` 提供服务。
-
-### 2.2 Windows Agent `agent/`
-
-| 文件 | 作用 | 关键点 |
-|------|------|--------|
-| `agent.py` | Python 主程序 | 屏幕捕获、输入模拟、WebSocket 客户端 |
-| `requirements.txt` | 依赖 | `pyautogui`（输入）、`Pillow`（截图）、`websockets` |
-
-**Python 版本：** 3.8+
-
-**关键全局变量：**
-- `_held_button` — 跟踪当前按住的鼠标按钮（`'left'`/`'right'`），用于 drag 支持
-- `handle_mouse()` — 鼠标事件处理，`move` 时若带有 `_held_button` 则用 `pyautogui.drag()` 而非 `moveTo()`
-- `handle_key()` — 键盘事件，区分 `down` / `up` / `press`
-
-**屏幕捕获方式：** `Pillow.ImageGrab`（截取全屏）→ JPEG 编码 → 通过 WebSocket 发送。
-**屏幕分辨率：** 启动时通过 `ctypes` 调用 Windows API 获取实际分辨率。
-**鼠标事件：** 通过 `pyautogui` 模拟，支持 click / drag / scroll。
-
-### 2.3 Flutter 移动端 `remote_control_app/`（独立仓库）
-
-位于 `D:\.openclaw\workspace\projects\mobile\remote_control_app/`。
-
----
-
-## 三、消息协议
-
-### 3.1 客户端 → 服务端
-```json
-{ "type": "mouse", "action": "down|up|move|click|scroll", "x": 100, "y": 200, "button": "left|right", "buttons": 1 }
-{ "type": "key", "action": "down|up|press", "key": "a" }
-{ "type": "clipboard", "action": "get|set", "content": "..." }
-{ "type": "file_request", "action": "download|upload", "path": "C:/Users/..." }
-{ "type": "agent", "action": "subscribe|unsubscribe", "agentId": "uuid" }
+┌─────────── Windows 端机器 ──────────────────────────────┐
+│                                                           │
+│  Session 0 (SYSTEM)                                       │
+│  ┌─────────────────────────────────────┐                  │
+│  │ service.py  (--mode=service)        │                  │
+│  │  • WebSocket ↔ VPS relay            │                  │
+│  │  • WTSQueryUserToken → spawn helper │                  │
+│  │  • 命名管道 CMD_PIPE 服务端         │◀─ auth token     │
+│  │  • 命名管道 FRAME_PIPE 服务端       │   (env var)      │
+│  │  • 路由：WS ⇄ helper                │                  │
+│  └─────────┬───────────────────────────┘                  │
+│            │  WTSQueryUserToken + CreateProcessAsUser     │
+│            ▼                                              │
+│  Session 1 (active user)                                  │
+│  ┌─────────────────────────────────────┐                  │
+│  │ helper.py  (--mode=helper)          │                  │
+│  │  • DXGI / mss / PIL 三级抓屏        │                  │
+│  │  • pyautogui + ctypes 输入注入      │                  │
+│  │  • 文件下载 / 上传                  │                  │
+│  │  • shell exec                       │                  │
+│  └─────────────────────────────────────┘                  │
+└───────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 服务端 → 客户端
-```json
-{ "type": "screen", "fmt": "jpeg", "data": "<base64>", "w": 1920, "h": 1080 }
-{ "type": "screen", "fmt": "jpeg", "data": "<base64>", "w": 1920, "h": 1080, "region": [x,y,w,h] }
-{ "type": "clipboard", "content": "..." }
-{ "type": "file_chunk", "session": "uuid", "chunk": "<base64>", "done": false }
+**为什么需要双进程？**
+- 抓屏 / 注入 / 文件对话框都要求**用户交互 session (Session 1+)**
+- Windows 服务跑在 Session 0（SYSTEM），不能直接做这些事
+- helper 跑在用户 session，service 负责长连接（WS）和协调
+
+## 2. 模块清单
+
+| 文件 | 行数 | 角色 | 关键 API |
+|------|------|------|----------|
+| `__init__.py` | 18 | 包标记 | `__version__` |
+| `__main__.py` | 56 | dispatcher | `python -m agent --mode=service\|helper\|auto` |
+| `protocol.py` | 142 | 管道帧协议 | `pack`, `read_envelope`, `send_msg`, `send_frame` |
+| `capture.py` | 130 | 抓屏后端选择 | `ScreenCapture(backend='auto')` |
+| `input_inject.py` | 158 | 输入注入 | `mouse_move`, `mouse_click`, `key_tap`, `type_text` |
+| `service.py` | 410 | Session 0 协调 | `PipeServer.start(on_hello)`, `spawn_helper_in_user_session` |
+| `helper.py` | 320 | Session 1 worker | `run_helper()` + `frame_sender` 线程 |
+
+## 3. IPC 协议（service ⇄ helper）
+
+**两条命名管道**（避免阻塞和消息混淆）：
+
+| 管道 | 方向 | 帧格式 | 用途 |
+|------|------|--------|------|
+| `\\.\pipe\RemoteControlAgent_Cmd` | 双向 | `[4-byte BE len][UTF-8 JSON]` | 控制消息（HELLO, INPUT, EXEC, FILE_*） |
+| `\\.\pipe\RemoteControlAgent_Frame` | helper→service | `[4-byte BE len][struct('>IQ', seq, ts_ms)][RGB raw]` | 抓屏帧（高吞吐） |
+
+**PIPE_BYTE_STREAM 模式** + **长度前缀 framing**（不要用 PIPE_TYPE_MESSAGE——`ReadFile(h, N)` 会返回整条 message 而忽略 N）
+
+**控制消息类型**（见 `protocol.py`）：
+- `MSG_HELLO` / `MSG_HELLO_ACK` — 握手 + 鉴权
+- `MSG_HEARTBEAT` — 心跳
+- `MSG_INPUT_MOUSE` / `MSG_INPUT_KEY` / `MSG_INPUT_HOTKEY` / `MSG_INPUT_TYPE` / `MSG_INPUT_CLIPBOARD_SET` — 输入
+- `MSG_INPUT_EXEC` / `MSG_INPUT_FILE_DOWNLOAD` / `MSG_INPUT_FILE_UPLOAD` — 文件 / shell
+- `MSG_CAPTURE_BATCH` — 帧批量
+- `MSG_EXEC_RESULT` / `MSG_FILE_DOWNLOAD_READY` / `MSG_FILE_DOWNLOAD_CHUNK` / `MSG_FILE_UPLOAD_ACK` — 反向
+- `MSG_STATUS` — helper 状态
+- `MSG_BYE` — 优雅断开
+
+**鉴权**：service 启动时 `secrets.token_urlsafe(32)` 生成 32 字符 token，通过 `RC_HELPER_TOKEN` 环境变量传给 helper。helper 在 HELLO 消息里带 token，service 不匹配就断开。
+
+## 4. 进程身份切换（Session 0 → Session 1）
+
+```python
+# service.py: spawn_helper_in_user_session()
+1. WTSQueryUserToken(WTS_CURRENT_SERVER_HANDLE, session_id)
+   → 拿 user token
+2. DuplicateTokenEx(token, TOKEN_ALL_ACCESS, ..., SecurityImpersonation, TokenPrimary)
+   → 转成可用的 primary token
+3. CreateProcessAsUserW(
+     token, None, python_cmd, ...,
+     lpDesktop='Default',        # 必须：否则 helper 没有 desktop
+     dwCreationFlags=CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
+     lpEnvironment=block,        # 注入 RC_HELPER_TOKEN
+     ...
+   )
 ```
 
----
+**坑**：
+- `OpenProcessToken` 拿到 SYSTEM token，`CreateProcessAsUser` 会因"主令牌不可用于交互"失败 → 必须 `WTSQueryUserToken`
+- `lpDesktop='Default'` 不可省，否则 helper 在 hidden station 跑（无法访问 user desktop）
+- `STARTF_USESHOWWINDOW | SW_HIDE` 让 helper 不弹黑窗
 
-## 四、构建与部署
+## 5. 抓屏后端选择
 
-### 4.1 服务器部署（VPS）
+| 后端 | 库 | 速度 | 锁屏下 | 推荐场景 |
+|------|------|------|--------|----------|
+| DXGI Desktop Duplication | `dxcam` | ⚡⚡⚡ | ❌（DWM 阻断） | 解锁状态，最快 |
+| GDI BitBlt (mss) | `mss` | ⚡⚡ | ❌（DWM 阻断） | 解锁状态，DXGI 不可用时 |
+| PIL.ImageGrab | `Pillow` | ⚡ | ❌（DWM 阻断） | 最后 fallback |
+
+**auto 模式**：`dxcam` → `mss` → `PIL.ImageGrab`，运行时探测可用性。
+
+**锁屏限制**：DWM 在锁屏时是唯一能访问 GDI/DXGI 的进程。所有这些后端都会 `E_ACCESSDENIED`。
+**双进程架构本身不能解决这个问题**——helper 跑在 user session 也被 DWM 拒。
+
+**真解锁屏抓屏**（v2.1+ TODO）：
+- 加 `Windows.Graphics.Capture (UWP)` 后端
+- 需在 helper 里调 `GraphicsCapturePicker`，初始化 COM STA
+- 详见 `capture.py` 的 TODO 注释
+
+## 6. 输入注入
+
+| 路径 | 库 | 适用 |
+|------|------|------|
+| 优先 | `pyautogui` | 跨平台接口干净 |
+| fallback | `ctypes + SendInput` | pyautogui 在 RDP/某些终端无响应时 |
+
+**坑**：
+- `pyautogui` 在 Windows 默认有 `pyautogui.FAILSAFE`：鼠标移到 (0,0) 抛 `FailSafeException`。helper 启动时 `pyautogui.FAILSAFE = False`。
+- `SendInput` 必须用 `ctypes` 而非 `win32api.keybd_event`（后者在新版 Windows 上已 deprecated）
+- 绝对坐标需要 `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK` flags
+
+## 7. 启动模式
+
 ```bash
-cd remote-control/server
-npm install
-ACCESS_PASSWORD=*** PORT=21112 node index.js
-# 或通过 pm2
-pm2 start index.js --name remote-control --env ACCESS_PASSWORD=***
+# Service（SYSTEM / Session 0）
+python -m agent --mode=service --config /path/to/.env
+
+# Helper（用户 Session 1，由 service 自动拉起）
+python -m agent --mode=helper
+# ↑ 通过 RC_HELPER_TOKEN 环境变量认证
+
+# Auto（旧版兼容，单进程模式）
+python -m agent --mode=auto
+# ↑ 等价于跑 agent.agent.WebSocketClient
 ```
 
-**重启后自动恢复：**
-```bash
-pm2 startup  # 生成 systemd init 脚本
-pm2 save     # 保存当前进程列表
-```
+**部署**：用 `deploy/install-windows-agent.ps1` 注册 service（nssm 或 schtasks）。
 
-### 4.2 Windows Agent 部署
+## 8. 环境变量
 
-```powershell
-cd remote-control/agent
-pip install -r requirements.txt
-# 设置服务器地址
-$env:RC_SERVER = "ws://8.137.116.121:21112"
-python agent.py
-```
+| 变量 | 必需 | 说明 |
+|------|------|------|
+| `RC_CONFIG_DIR` | 是 | 配置目录（`%APPDATA%\RemoteControlAgent\`） |
+| `RC_HELPER_TOKEN` | service 模式 | helper 鉴权 token（service 启动时生成） |
+| `ACCESS_PASSWORD` | 是 | WebSocket 认证密码（与 server 一致） |
+| `SCREEN_FPS` | 否 | 抓屏帧率（默认 10） |
+| `WS_URL` | service 模式 | VPS relay URL（如 `ws://8.137.116.121:21112`） |
+| `PYTHONIOENCODING` | 是 | 强制 `utf-8`（Windows 默认 cp936） |
 
-**打包为 exe（可选）：**
-```powershell
-pip install pyinstaller
-pyinstaller --onefile --noconsole --name RemoteControlAgent agent.py
-```
+完整模板：`deploy/.env.windows`
 
-### 4.3 Flutter 移动端构建
-```bash
-# 清理
-flutter clean
+## 9. 调试清单
 
-# Release 构建（推荐，Flutter 3.24 + android-arm64）
-flutter build apk --release --target-platform android-arm64
+| 症状 | 检查 |
+|------|------|
+| helper 启动后立即退出 | 看 `RC_HELPER_TOKEN` 是否一致 |
+| service 报 "token mismatch" | helper 的 token env 没传过去；查 `CreateProcessAsUser` 的 lpEnvironment |
+| 抓屏 `拒绝访问` | 机器在锁屏状态（`OpenInputDesktop=0` / `LogonUI` 进程） |
+| 输入无响应 | helper 跑的 session 不是用户那个（`wts_session_id` 0 = SYSTEM） |
+| 管道 `all instances are busy` | service 的 `cmd_conn` / `frame_conn` 泄漏；重启 service |
 
-# 输出
-# build/app/outputs/flutter-apk/app-release.apk
-```
+日志：`%APPDATA%\RemoteControlAgent\logs\agent.log`（轮转 5 × 5MB）
 
-**构建注意事项：**
-- Flutter SDK：`D:\flutter-3.24`（稳定版，`3.41.6` 太新导致 Maven artifacts 缺失），需要 `android-arm64` target（手机通常是这个架构）
-- Gradle 离线构建：`--offline` 在有缓存时可用
+## 10. 版本迁移
 
-### 4.4 本地运行回归测试
-
-仓库根目录有两个不依赖外部资源的烟雾测试，启动临时端口的服务器实例并跑完所有断言后自动清理。
-
-```powershell
-cd remote-control
-npm --prefix server install
-node smoke_test.js     # Static Deploy API（15 断言）
-node upload_test.js    # /api/upload 与 multer 2.x（12 断言）
-```
-
-两个脚本都会拉起独立端口的临时服务器，结束后自动删除上传文件、退出进程。
-
-### 4.5 鉴权约定
-
-所有需要密码的 REST 接口（`/api/agents`、`/api/deploy/*`）使用 `Authorization: Bearer <base64(password)>`，把 `ACCESS_PASSWORD` 经 base64 编码后放入 `Bearer` 字段。WebSocket 路径 `/agent` 与 `/client` 不需要此 Bearer（Agent 使用 agentId + secret，Client 通过订阅消息路由）。
+| 版本 | 模式 | 状态 |
+|------|------|------|
+| 1.x | 单进程 WebSocketClient | 已废弃（`--mode=auto` 兼容） |
+| 2.0+ | 双进程 service+helper | **当前** |
+| 2.1+ (TODO) | + WGC UWP 后端 | 解锁锁屏抓屏 |
 
 ---
 
-## 五、修改指南
-
-### 5.1 添加新的鼠标按钮（如中键）
-**Agent 端：** `agent.py` 的 `handle_mouse()` 中，`button` 参数增加 `'middle'` 分支，对应 `pyautogui.mouseDown(button='middle')`。
-**移动端：** `touch_handler.dart` 的 `_mapButtonsToString()` 中添加对应的位标记映射。
-
-### 5.2 添加新的键盘快捷键
-**Agent 端：** `agent.py` 的 `handle_key()` 函数中，在 `SPECIAL_KEYS` 字典添加新映射。
-**协议：** 特殊键用字符串如 `'ctrl+alt+del'`，普通键直接传字符。
-
-### 5.3 修改屏幕编码格式
-**Agent 端：** `agent.py` 中 `capture_screen()` 函数负责截图 → `PIL.Image` → JPEG base64。如需切换到 PNG 或 H.264，修改该函数返回值即可。
-
-### 5.4 添加新的服务器消息类型
-在 `server/index.js` 的 `wss.on('connection')` 回调中，在 `switch(msg.type)` 分支添加新的 case。
-
-### 5.5 添加新的静态部署路径
-**前置：** 部署接口已加鉴权（见 §4.5），新路径会自动继承。
-**扩展：** 如果要加新的 PUT 接口，沿用 `requireDeployAuth` 中间件 + `resolveSafeDeployPath` 工具函数即可。**不要**直接用 `req.params.filepath` 拼路径 —— 已封装的工具会做 `path.resolve` 边界检查 + 拒绝 NUL 字节和绝对路径。
-
-### 5.6 升级依赖版本
-- `multer`：当前固定在 `^2.x`（2.x 修复了 1.x 的多个已知漏洞）。升级前先跑 `node upload_test.js` 确认 `/api/upload` 行为。
-- `express` / `ws` / `uuid`：跟随 `npm audit` 提示升级，跑两套测试即可。
-
----
-
-## 六、故障排查
-
-| 现象 | 可能原因 | 解决方案 |
-|------|----------|----------|
-| 屏幕黑屏 | Agent 未启动 / 网络不通 | 检查 Agent 是否运行，`ping 8.137.116.121` |
-| 拖拽失效 | `_held_button` 状态丢失 | 检查 `handle_mouse` 中 `move` 事件是否正确调用 `drag()` |
-| 文件上传失败 | `uploads/` 目录无写权限 | 检查 `server/uploads/` 目录是否存在 |
-| 部署接口 401 | 未带 `Authorization` 头 | 在 Header 里加 `Authorization: Bearer <base64(ACCESS_PASSWORD)>` |
-| 部署接口 403 | 路径含 `..` 或绝对路径 | 调用方应确保路径相对且不含穿越序列 |
-| 部署接口 413 | 文件超过 50MB | 单文件限制由 `DEPLOY_MAX_BYTES` 控制，可调整 |
-| Agent 连接不上 | 密码错误或端口被占 | 确认 `ACCESS_PASSWORD` 和 `PORT` 环境变量 |
-| 移动端触摸无反应 | Flutter `Listener` 未正确包裹屏幕区域 | 检查 `remote_page.dart` 中 `Listener` 的 `parent widget` |
-
----
-
-## 七、重要约束
-
-1. **不提交依赖包** — `node_modules/`、`__pycache__/`、`build/` 全部通过 `.gitignore` 排除
-2. **服务器密码不放代码** — 通过环境变量 `ACCESS_PASSWORD` 注入
-3. **Agent 主动连接** — 不需要 VPS 主动访问 Windows，Windows Agent 出站连接更安全
-4. **拖拽必须保持按钮状态** — `move` 事件必须携带当前按住的按钮，`pyautogui.moveTo()` 会丢失按钮状态
-5. **部署接口默认带鉴权** — 新增 PUT/DELETE 类部署端点时**必须**沿用 `requireDeployAuth` 中间件，不要开成匿名
-6. **不要手动编辑 `uploads/` 或 `static/app/`** — 这两个是运行时产物，已在 `.gitignore` 中
-
----
-
-## 八、联系方式
-
-**Owner：** 魏超
-**平台：** 飞书（`ou_755999aa81d7950e4a2a5f0190f0326e`）
+详见 `DEBUGGING.md`（抓屏 / 输入 / 锁屏具体场景）。

@@ -1,175 +1,111 @@
-# 远程控制系统
+# Remote Control
 
-一套自建的远程控制方案，支持从安卓浏览器直接控制 Windows 电脑。
+> 自托管远程控制工具：浏览器 ⇄ VPS relay ⇄ Windows Agent
 
-**核心特点：**
-- 🌐 纯 Web 界面，无需安装任何 App（安卓浏览器即可）
-- 🔒 Windows Agent 主动连接云服务器（outbound），无需端口映射
-- 💻 全功能：屏幕查看、鼠标键盘控制、命令执行、文件传输
+- **VPS relay (Node)**：Nginx 9080/8443 → Node 21112，转发 WebSocket
+- **Windows Agent (Python)**：抓屏 / 输入 / 文件 / shell
+- **Web Client**：浏览器，零安装
+- **Mobile Client**：Flutter App（`projects/mobile/remote_control_app/`）
 
----
-
-## 系统架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                                                         │
-│  ┌──────────┐     HTTPS/WSS      ┌──────────────────┐  │
-│  │ Android  │◄──────────────────►│  Cloud VPS        │  │
-│  │ Browser  │                    │  (Node.js Relay)  │  │
-│  └──────────┘                    │                   │  │
-│                                  │  • Web 控制台     │  │
-│                                  │  • WebSocket 路由 │  │
-│                                  │  • 文件中转       │  │
-└──────────────────────────────────│──────────────────│──┘
-                                    └───────▲──────────┘
-                                              │
-                                       outbound WS
-                                              │
-                                    ┌─────────┴────────┐
-                                    │  Windows Agent    │
-                                    │  (Python)         │
-                                    │  • 屏幕捕获       │
-                                    │  • 输入模拟       │
-                                    │  • 命令执行       │
-                                    │  • 文件传输       │
-                                    └──────────────────┘
-```
-
----
-
-## 快速部署
-
-### 第一步：云服务器（VPS）
-
-最低配置：1核 1G 内存，推荐 2G 以上（用于中转大文件）
-
-```bash
-# 1. 安装 Node.js 18+
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash -
-sudo apt install nodejs
-
-# 2. 下载服务端
-git clone <your-repo>
-cd remote-control/server
-npm install
-
-# 3. 启动（生产环境建议用 systemd 或 pm2）
-#    ACCESS_PASSWORD: 服务器访问密码（必填）
-#    PORT: 监听端口（默认 21112）
-ACCESS_PASSWORD='你的密码' PORT=21112 node index.js
-```
-
-**推荐：使用 Nginx 反向代理 + SSL**
-```nginx
-server {
-    listen 443 ssl;
-    server_name your-domain.com;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:21112;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-}
-```
-
-### 第二步：Windows Agent
-
-```powershell
-# 1. 安装 Python 3.8+
-# 下载: https://www.python.org/downloads/
-
-# 2. 安装依赖（管理员权限运行 PowerShell）
-cd remote-control/agent
-pip install -r requirements.txt
-
-# 3. 设置服务器地址（改为你的 VPS IP 或域名）
-$env:RC_SERVER = "ws://你的服务器IP:21112"
-
-# 4. 运行 Agent
-python agent.py
-```
-
-运行后会显示：
-```
-Agent ID:  xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-Secret:    abcdefgh12345678
-```
-
-**把 Agent ID 和 Secret 记录下来，用于连接。**
-
-### 第三步：安卓访问
-
-1. 打开浏览器，访问 `https://你的服务器IP`
-2. 点击「连接」，输入 Agent ID
-3. 输入 Secret（Agent 端显示的密钥）
-4. 开始控制！
-
----
-
-## 功能说明
-
-### 屏幕控制
-- 鼠标点击、拖拽、滚轮
-- 触摸手势（移动端）
-- 缩放：50% - 300%
-
-### 快捷键
-- Ctrl+Alt+Del、Alt+Tab、Win 键
-- Alt+F4 关闭窗口
-
-### 终端
-- 直接在浏览器执行 CMD/PowerShell 命令
-- 支持中文输出
-- 命令历史
-
-### 文件传输
-- 从 Windows 下载文件到本地
-- 从本地上传文件到 Windows
-- 大文件自动分块
-
----
-
-## 安全建议
-
-1. **更换 Secret**：Agent 的 secret 是自动生成的，生产环境建议定期更换
-2. **防火墙**：只开放 443 端口
-3. **Agent 权限**：Agent 以当前用户权限运行，不要用管理员运行
-4. **HTTPS**：必须使用 HTTPS，否则浏览器不允许 WebSocket
-
----
-
-## 目录结构
+## 仓库结构
 
 ```
 remote-control/
-├── server/                    # 云服务器端 (Node.js)
-│   ├── package.json
-│   ├── index.js              # 主入口
-│   └── static/               # Web 控制台
-│       └── index.html
-├── agent/                    # Windows Agent (Python)
-│   ├── agent.py              # 主程序
-│   └── requirements.txt      # Python 依赖
-├── SPEC.md                   # 设计规范
-└── README.md
+├── server/                # Node.js 中继 (VPS)
+│   ├── index.js           # WS 路由 + 静态前端托管
+│   └── package.json
+├── agent/                 # Python 端 Agent (Windows)
+│   ├── __init__.py
+│   ├── __main__.py        # dispatcher (--mode=service|helper|auto)
+│   ├── protocol.py        # 命名管道帧协议
+│   ├── capture.py         # DXGI/mss/PIL 三级抓屏
+│   ├── input_inject.py    # 鼠标键盘注入
+│   ├── service.py         # Session 0 协调器
+│   └── helper.py          # Session 1 worker
+├── client/web/            # 浏览器客户端 (VPS 静态托管)
+├── deploy/                # 部署脚本
+│   ├── build-tar.ps1
+│   ├── deploy-vps.ps1
+│   ├── vps-install.sh
+│   ├── install-windows-agent.ps1
+│   └── remote-control.service
+├── tests/                 # 自动化测试（详见 test_design.md）
+├── AGENT.md               # ★ Windows Agent 架构说明
+├── DEBUGGING.md           # 故障排查
+├── SPEC.md                # 原始规格
+└── test_design.md         # 测试设计（60+ 功能点 / 7 个套件）
 ```
 
----
+## 快速开始
 
-## 一键打包 Windows Agent（可选）
+### VPS 端
 
-用 PyInstaller 将 Agent 打包成单个 exe：
+```bash
+# 部署（幂等）
+pwsh deploy/build-tar.ps1
+pwsh deploy/deploy-vps.ps1
+
+# 检查状态
+ssh -p 2222 root@8.137.116.121 'systemctl status remote-control'
+curl http://8.137.116.121:9080/
+```
+
+### Windows 端
 
 ```powershell
-pip install pyinstaller
-pyinstaller --onefile --noconsole --name RemoteControlAgent agent.py
+# 安装 service（nssm 注册）
+pwsh deploy/install-windows-agent.ps1
+
+# 手动跑 helper 测抓屏
+$env:RC_HELPER_TOKEN="<from service log>"
+& python -m agent --mode=helper
+
+# 手动跑 service
+& python -m agent --mode=service
 ```
 
-生成的 exe 在 `dist/RemoteControlAgent.exe`，可以分发给其他 Windows 机器。
+### 浏览器访问
+
+打开 `http://8.137.116.121:9080/`，输入 `ACCESS_PASSWORD`，看到 Agent 桌面即可。
+
+## 架构：为什么是双进程
+
+| 进程 | Session | 职责 | 通信 |
+|------|---------|------|------|
+| **service** | 0 (SYSTEM) | WebSocket / 长连接 / 文件路由 | ⇄ VPS via WS<br>⇄ helper via 命名管道 |
+| **helper** | 1+ (user) | 抓屏 / 注入 / 文件 I/O / shell | ⇄ service via 命名管道 |
+
+**关键不变量**：
+- 抓屏 / 鼠标 / 键盘 / 文件对话框 → **必须在 user session**（Session 0 看不见桌面）
+- WS 长连接 / 服务注册 / 远程控制 / 心跳 → **SYSTEM 跑更稳**（机器重启后不用等用户登录）
+- 进程间通信用 **命名管道**（同机最快，不走网络栈）
+
+**锁屏抓屏限制**：DWM 在锁屏时拒绝所有 GDI/DXGI 访问，**双进程不能绕过**。
+需要解锁屏抓屏得加 Windows.Graphics.Capture (UWP) 后端——见 `AGENT.md` §5 和 `capture.py` TODO。
+
+## 详细文档
+
+- **`AGENT.md`** — Agent 架构、IPC 协议、Session 切换、抓屏后端
+- **`DEBUGGING.md`** — 故障排查（BitBlt 拒绝、WS 断连、helper 不启动 等）
+- **`test_design.md`** — 测试设计 + 7 个套件清单
+- **`SPEC.md`** — 原始产品需求
+
+## 状态
+
+| 组件 | 状态 |
+|------|------|
+| VPS relay (Node) | ✅ 已部署 systemd 稳定运行 |
+| Web client | ✅ 浏览器可用 |
+| Windows Agent v2.0 双进程 | ✅ 架构落地，IPC 烟测 HELLO+ACK 通过 |
+| Windows Agent 帧传输 | ⏳ read_frame 在 PIPE_BYTE_STREAM 下待调试（独立 PR） |
+| 锁屏抓屏 | ❌ DWM 阻断，2.1+ 加 WGC 后端 |
+| install-windows-agent.ps1 双进程版 | ⏳ TODO |
+| WebSocket ↔ helper 桥接 | ⏳ TODO |
+
+## 协议 / 端口
+
+- 21112 — Node relay（systemd）
+- 9080 — Nginx → 21112 (HTTP)
+- 8443 — 历史 HTTPS（未启用）
+- `\\.\pipe\RemoteControlAgent_Cmd` — service ⇄ helper 控制
+- `\\.\pipe\RemoteControlAgent_Frame` — helper → service 抓屏帧
