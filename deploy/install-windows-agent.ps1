@@ -129,7 +129,25 @@ set PYTHONIOENCODING=utf-8
     & $NssmPath set    $ServiceName AppRotateFiles        1
     & $NssmPath set    $ServiceName AppRotateBytes        10485760
     & $NssmPath set    $ServiceName AppRotateOnline       1
-    & $NssmPath set    $ServiceName AppEnvironmentExtra   "PYTHONIOENCODING=utf-8`nPYTHONPATH=$((Get-Location).Path)`nRC_MODE=service`nRC_CONFIG_DIR=$DataDir"
+    # Parse env file (skip blank lines + comments) and merge into
+    # nssm's AppEnvironmentExtra so the agent process actually sees
+    # WS_URL / ACCESS_PASSWORD / AGENT_ID. Previously these vars were
+    # only written to agent.env for human reference — the running
+    # Python process never read them.
+    $envExtras = @(
+        'PYTHONIOENCODING=utf-8'
+        "PYTHONPATH=$((Get-Location).Path)"
+        'RC_MODE=service'
+        "RC_CONFIG_DIR=$DataDir"
+    )
+    Get-Content $EnvFile | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith('#') -and $line -match '^([A-Z_][A-Z0-9_]*)=(.*)$') {
+            $envExtras += "$($Matches[1])=$($Matches[2])"
+        }
+    }
+    $envExtraJoined = $envExtras -join "`n"
+    & $NssmPath set    $ServiceName AppEnvironmentExtra   $envExtraJoined
     & $NssmPath set    $ServiceName AppRestartDelay       5000
     & $NssmPath set    $ServiceName AppExitTypes          All
     # Need SeTcbPrivilege for CreateProcessAsUser to spawn helper. nssm by

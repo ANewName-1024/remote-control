@@ -168,6 +168,29 @@ def _get_machine_fingerprint():
     return hashlib.sha1(hostname.encode()).hexdigest()[:16]
 
 def get_or_create_credentials():
+    """Resolve agent_id / secret / server_url from env first, then
+    agent.json, then fingerprint-derived defaults.
+
+    Resolution order:
+    1. Environment variables (set by install-windows-agent.ps1 via
+       AppEnvironmentExtra, or manually): AGENT_ID, AGENT_SECRET,
+       WS_URL / RC_SERVER
+    2. agent.json (created on first run; persists across restarts)
+    3. Fresh fingerprint (uuid5 of hostname + MAC)
+
+    Bug fix (2026-06-04): previously env vars were ignored, so editing
+    agent.env's AGENT_ID had no effect — the user would see the
+    auto-generated UUID forever and the server would reject their
+    custom ID.
+    """
+    # 1. Try env var overrides first.
+    env_agent_id = os.environ.get('AGENT_ID')
+    env_secret = os.environ.get('AGENT_SECRET') or os.environ.get('ACCESS_PASSWORD')
+    env_ws_url = os.environ.get('WS_URL') or os.environ.get('RC_SERVER')
+    if env_agent_id and env_secret:
+        logging.info(f"Using credentials from env: AGENT_ID={env_agent_id[:8]}...")
+        return env_agent_id, env_secret, env_ws_url or SERVER_URL
+
     cfg = load_config()
     if cfg.get('agent_id') and cfg.get('secret'):
         return cfg['agent_id'], cfg['secret'], cfg.get('server_url', SERVER_URL)
@@ -283,8 +306,9 @@ def parse_key(key):
 
 def handle_mouse(x, y, button, action):
     if not PYAUTOGUI_AVAILABLE:
+        logging.warning(f"handle_mouse: PYAUTOGUI NOT AVAILABLE — skipping (x={x} y={y} act={action})")
         return
-    
+    logging.info(f"handle_mouse: x={x} y={y} btn={button} act={action}")
     w, h = get_screen_size()
     x = max(0, min(x, w - 1))
     y = max(0, min(y, h - 1))
@@ -310,8 +334,9 @@ def handle_mouse(x, y, button, action):
 
 def handle_key(key, action):
     if not PYAUTOGUI_AVAILABLE:
+        logging.warning(f"handle_key: PYAUTOGUI NOT AVAILABLE")
         return
-    
+    logging.info(f"handle_key: key={key} act={action}")
     vk = parse_key(key)
     if vk is None:
         logging.warning(f"Unknown key: {key}")
@@ -1138,7 +1163,7 @@ class RemoteControlApp:
     
     def _on_message(self, msg):
         t = msg.get('type', '')
-        
+        logging.info(f"[RECV] type={t} msg_keys={list(msg.keys())} msg={msg}")
         if t == 'mouse':
             handle_mouse(msg.get('x', 0), msg.get('y', 0), msg.get('button', 'left'), msg.get('action', 'move'))
         
@@ -1251,17 +1276,55 @@ class RemoteControlApp:
 # ============================================================
 
 if __name__ == '__main__':
-    # Single instance check using file lock
+    # Single instance check using file lock.
+    # Bug fix (2026-06-04): a previous run that crashed (or was
+    # killed by taskkill / nssm) leaves a stale agent.lock behind.
+    # The next launch would hit `sys.exit(0)` and appear to start
+    # successfully, but actually never run, so the service stays
+    # PAUSED forever and the user sees "agent offline".
+    # Fix: if the lock file points at a PID that no longer exists,
+    # unlink it and try again.
     lock_file = os.path.join(CONFIG_DIR, 'agent.lock')
     lock_fd = None
-    try:
-        lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(lock_fd, str(os.getpid()).encode())
-    except FileExistsError:
-        print(f'{APP_NAME} is already running! (another instance is active)')
-        sys.exit(0)
-    except Exception as e:
-        pass  # Lock file failed, just continue
+    for _attempt in range(2):  # max 2 attempts: normal + stale-recover
+        try:
+            lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(lock_fd, str(os.getpid()).encode())
+            break
+        except FileExistsError:
+            # Check if the existing lock is stale (PID no longer alive).
+            stale = True
+            try:
+                with open(lock_file, 'r') as f:
+                    old_pid = int(f.read().strip() or '0')
+                if old_pid > 0:
+                    # Windows: check if PID is in the running process list.
+                    import ctypes
+                    PROCESS_QUERY_LIMITED = 0x1000
+                    h = ctypes.windll.kernel32.OpenProcess(
+                        PROCESS_QUERY_LIMITED, False, old_pid)
+                    if h:
+                        exit_code = ctypes.c_ulong()
+                        ctypes.windll.kernel32.GetExitCodeProcess(h, exit_code)
+                        ctypes.windll.kernel32.CloseHandle(h)
+                        # STILL_ACTIVE = 259 means the process is alive.
+                        if exit_code.value == 259:
+                            stale = False
+            except Exception:
+                pass
+            if stale:
+                print(f'{APP_NAME}: stale lock from previous run, removing')
+                try: os.unlink(lock_file)
+                except Exception: pass
+                # Loop and try again.
+                continue
+            print(f'{APP_NAME} is already running! (another instance is active)')
+            sys.exit(0)
+        except Exception as e:
+            pass  # Lock file failed for other reason, just continue
+    else:
+        # Both attempts failed; fall through and continue without lock.
+        pass
     
     app = RemoteControlApp()
     app.run()
