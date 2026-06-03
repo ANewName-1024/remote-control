@@ -502,8 +502,13 @@ def run(config_dir: str = None):
     # We keep the same frame_count + periodic-log behavior for visibility.
     bridge = None
     ws_url = os.environ.get('WS_URL')
-    agent_id = os.environ.get('AGENT_ID', socket.gethostname() if False else 'agent-' + os.environ.get('COMPUTERNAME', 'local'))
-    secret = os.environ.get('AGENT_SECRET', '')
+    # Precedence: AGENT_ID env > COMPUTERNAME-based default.
+    # (The previous 'if False' dead-code meant socket.gethostname()
+    # never ran — harmless but confusing. Removed.)
+    agent_id = os.environ.get('AGENT_ID') or ('agent-' + os.environ.get('COMPUTERNAME', 'local'))
+    # Accept both AGENT_SECRET (preferred) and ACCESS_PASSWORD
+    # (legacy alias still used by the install script).
+    secret = os.environ.get('AGENT_SECRET') or os.environ.get('ACCESS_PASSWORD') or ''
     if ws_url and secret:
         from . import ws_bridge as _wsb
         bridge = _wsb.WSBridge(pipes, ws_url, agent_id, secret)
