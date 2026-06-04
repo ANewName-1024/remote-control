@@ -45,6 +45,112 @@ AUTH_TOKEN = os.environ.get('RC_HELPER_TOKEN', '')
 START_TS = time.time()
 
 
+# ============================================================
+# Click markers: visible visual feedback on the captured screen
+# ============================================================
+# When a mouse-down (or click / double_click) event arrives from
+# the App, we record the (x, y) in desktop pixel coordinates and
+# draw a bright red ring + crosshair + coordinate text on the
+# next ~1.5 seconds of captured frames. This makes the
+# App -> desktop coordinate mapping immediately observable: the
+# user can tell at a glance whether the click landed where they
+# expected, and if not, how far off (in pixels) it landed.
+#
+# The marker is drawn on the CAPTURED frame buffer, before
+# encoding, so it shows up in the App itself -- no need to look
+# at the actual Windows desktop. (The same approach could be
+# used to draw on the real desktop via a transparent overlay
+# window, but that would race with the user actually clicking
+# on the desktop, and would add a click-through-anything
+# overlay that can be confusing.)
+
+_MARKER_DURATION_S = 1.5
+_MARKER_RADIUS_PX = 60   # outer ring radius in DESKTOP pixels
+_MARKER_RING_WIDTH = 8
+_MARKER_CROSSHAIR_LEN = 40
+_markers: list = []  # list of (x, y, button, expires_at)
+_markers_lock = threading.Lock()
+
+
+def _record_click(x: int, y: int, button: str) -> None:
+    """Push a new click marker. The frame_sender will draw it on
+    subsequent frames for ~1.5s."""
+    expires = time.time() + _MARKER_DURATION_S
+    with _markers_lock:
+        _markers.append((int(x), int(y), button, expires))
+    log.info(f'CLICK MARKER at desktop ({x}, {y}) button={button}')
+
+
+def _draw_markers(img) -> None:
+    """Draw all live markers onto the given PIL Image (in-place).
+    Removes expired markers. Pure-PIL drawing -- no extra deps."""
+    from PIL import ImageDraw, ImageFont
+    now = time.time()
+    with _markers_lock:
+        live = [m for m in _markers if m[3] > now]
+        # mutate in place so we don't keep growing
+        _markers[:] = live
+    if not live:
+        return
+    draw = ImageDraw.Draw(img, 'RGBA')
+    # Try to load a font, fall back to default
+    font = None
+    for path in (
+        r'C:\Windows\Fonts\consolab.ttf',  # Consolas Bold
+        r'C:\Windows\Fonts\consola.ttf',
+        r'C:\Windows\Fonts\arialbd.ttf',
+        r'C:\Windows\Fonts\arial.ttf',
+    ):
+        if os.path.exists(path):
+            try:
+                font = ImageFont.truetype(path, 24)
+                break
+            except Exception:
+                pass
+    if font is None:
+        font = ImageFont.load_default()
+    w, h = img.size
+    for (x, y, btn, _exp) in live:
+        # Cull out markers that landed outside the screen -- the
+        # user can't see them anyway and drawing them risks PIL
+        # blowing up on negative ellipse args.
+        if x < -_MARKER_RADIUS_PX or y < -_MARKER_RADIUS_PX \
+                or x > w + _MARKER_RADIUS_PX or y > h + _MARKER_RADIUS_PX:
+            continue
+        r = _MARKER_RADIUS_PX
+        cw = _MARKER_RING_WIDTH
+        cl = _MARKER_CROSSHAIR_LEN
+        # Bright red ring (outer + inner alpha so the ring is
+        # visible against bright desktop backgrounds like
+        # white windows)
+        ring_box = (x - r, y - r, x + r, y + r)
+        draw.ellipse(ring_box, outline=(255, 0, 0, 255), width=cw)
+        # Crosshair through the center, going from -cl to +cl
+        draw.line([(x - cl, y), (x + cl, y)], fill=(255, 0, 0, 255), width=4)
+        draw.line([(x, y - cl), (x, y + cl)], fill=(255, 0, 0, 255), width=4)
+        # Center dot
+        draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=(255, 0, 0, 255))
+        # Coordinate label just above the ring (or below if
+        # we're near the top of the screen)
+        label = f'({x},{y}) {btn}'
+        # Use textbbox for accurate sizing
+        try:
+            tb = draw.textbbox((0, 0), label, font=font)
+            tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        except Exception:
+            tw, th = 200, 28
+        lx = x - tw // 2
+        ly = y - r - th - 8 if y - r - th - 8 > 0 else y + r + 8
+        # Black outline so the text is readable on any background
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                draw.text((lx + dx, ly + dy), label, font=font,
+                          fill=(0, 0, 0, 255))
+        draw.text((lx, ly), label, font=font, fill=(255, 255, 0, 255))
+
+
 def connect_pipe(name: str, retries: int = 30, delay: float = 0.5):
     """Connect to a named pipe with retry. Returns the pipe handle or None."""
     import pywintypes  # type: ignore
@@ -132,6 +238,15 @@ def frame_sender(stop_event: threading.Event):
                 # Convert numpy RGB to PIL Image for DeltaScreenCapture.
                 from PIL import Image
                 img = Image.fromarray(arr)
+                # Overlay any live click markers so the user can see
+                # exactly where the App's click landed on the desktop.
+                # Markers are recorded by _record_click() from
+                # cmd_loop's input_mouse handler. Drawn here on the
+                # raw frame BEFORE DeltaScreenCapture splits it into
+                # kf/df regions, so the marker survives the delta
+                # encoding (it just becomes part of the changed
+                # pixels and the server pushes a df update).
+                _draw_markers(img)
                 msg = delta.capture_and_encode()
                 if msg is None:
                     skip_count += 1
@@ -180,8 +295,20 @@ def handle_cmd_message(msg: dict, screen_size, helper_id: str) -> dict:
             return {'type': ipc.MSG_HEARTBEAT, 'ts': time.time()}
 
         elif t == ipc.MSG_INPUT_MOUSE:
-            inp.mouse(msg['x'], msg['y'], msg.get('button', 'left'),
-                      msg.get('action', 'move'), screen_size)
+            x, y = msg['x'], msg['y']
+            btn = msg.get('button', 'left')
+            act = msg.get('action', 'move')
+            inp.mouse(x, y, btn, act, screen_size)
+            # Record a click marker on the captured screen so the
+            # user can SEE where the click actually landed in
+            # desktop pixel coordinates. Useful for debugging the
+            # App -> desktop coordinate mapping (letterbox, scale,
+            # zoom). Drawn for ~1.5s as a red ring + crosshair +
+            # coordinate text. We only mark button-down events --
+            # pure 'move' would flood the queue with markers and
+            # would just be visual noise.
+            if act in ('down', 'click', 'double_click'):
+                _record_click(x, y, btn)
             return None
 
         elif t == ipc.MSG_INPUT_KEY:
