@@ -23,6 +23,8 @@ import time
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
+from . import protocol as ipc
+
 log = logging.getLogger('ws-bridge')
 
 # Try websocket-client (preferred). Fall back to a minimal pure-stdlib
@@ -165,22 +167,44 @@ class WSBridge:
     # ---- server -> helper ----
 
     def _on_server_msg(self, msg: dict) -> None:
-        """Dispatch a message from the server to the helper via cmd pipe."""
+        """Dispatch a message from the server to the helper via cmd pipe.
+
+        Clients (HTML page, Flutter App) speak the legacy combined
+        "type: mouse / key" wire format. The v2 helper, however, splits
+        input into separate IPC types (`input_mouse`, `input_key`,
+        `input_hotkey`, `input_type`, ... — see agent.protocol). We
+        translate once on the bridge so any client works regardless of
+        whether the server normalizes the wire format.
+        """
         t = msg.get('type')
         if t in ('auth_ok', 'auth_failed', 'agent_offline', 'error', 'client_connected', 'client_disconnected'):
             log.info(f'WS: {t}: {msg}')
             return
-        if t == 'input':
-            # mouse/keyboard event from remote client
+        if t == 'mouse':
+            # mouse event from remote client (action: down/up/move/click/double_click/wheel)
             self.cmds_recv += 1
             try:
                 self.pipes.send_cmd({
-                    'type': 'input',
-                    'kind': msg.get('kind'),  # 'mouse' | 'key' | 'wheel' | 'hotkey' | 'type'
-                    'payload': msg.get('payload'),
+                    'type': ipc.MSG_INPUT_MOUSE,
+                    'x': msg.get('x'),
+                    'y': msg.get('y'),
+                    'button': msg.get('button', 'left'),
+                    'action': msg.get('action', 'move'),
                 })
             except Exception as e:
-                log.warning(f'WS->helper input forward failed: {e}')
+                log.warning(f'WS->helper mouse forward failed: {e}')
+            return
+        if t == 'key':
+            # keyboard event from remote client (action: down/up/press)
+            self.cmds_recv += 1
+            try:
+                self.pipes.send_cmd({
+                    'type': ipc.MSG_INPUT_KEY,
+                    'key': msg.get('key', ''),
+                    'action': msg.get('action', 'press'),
+                })
+            except Exception as e:
+                log.warning(f'WS->helper key forward failed: {e}')
             return
         if t in ('exec', 'file_request'):
             # Server-relayed command; forward to helper
