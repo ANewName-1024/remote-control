@@ -95,7 +95,7 @@ class WSBridge:
 
     def start(self) -> None:
         """Start all bridge threads."""
-        for target in (self._ws_loop, self._frame_pump, self._heartbeat):
+        for target in (self._ws_loop, self._frame_pump, self._heartbeat, self._keepalive_loop):
             t = threading.Thread(target=target, daemon=True, name=f'ws-{target.__name__}')
             t.start()
             self._threads.append(t)
@@ -199,6 +199,57 @@ class WSBridge:
             except Exception as e:
                 log.warning(f'WS recv error: {e}')
                 raise
+
+    def _keepalive_loop(self) -> None:
+        """Send a small business keepalive every 25s.
+
+        Why: server sends WS protocol pings every 25s (which keep the
+        TCP connection warm and let the agent's recv() notice a dead
+        socket eventually). But the server has no symmetric signal from
+        the agent -- so a half-dead socket (e.g. NAT dropped the
+        outbound but the inbound pings still come from a stale state)
+        leaves the server's `AGENTS.get(id).lastSeen` fresh forever,
+        and `targetAgent.ws.send(mouse)` happily buffers into a socket
+        that the next network write will reset. The mouse frames never
+        reach the agent.
+
+        Sending a business-level keepalive (a real JSON message the
+        server has to actually deliver) catches this: if the socket is
+        half-dead, either the send raises (we re-raise to leave
+        _ws_loop) or the server stops getting the keepalive and clears
+        the agent entry, which the App will see as agent_offline.
+        """
+        while not self._stop.is_set():
+            # Wait until _connect() has set the connection event.
+            self._connected.wait(timeout=1.0)
+            if self._stop.is_set():
+                return
+            # Small post-auth grace period so we don't send keepalive
+            # before auth_ok arrives.
+            for _ in range(25):
+                if self._stop.is_set() or self.auth_ok:
+                    break
+                time.sleep(1.0)
+            if self._stop.is_set() or not self.auth_ok:
+                continue
+            try:
+                self._send({'type': 'keepalive', 'ts': time.time()})
+            except Exception as e:
+                # The send is over a half-dead socket. Re-raise so
+                # _ws_loop can be killed by this same exception; the
+                # outer reconnect loop will then re-establish a clean
+                # connection. Without this, we'd silently keep
+                # 'connecting' in lastSeen while the agent is
+                # unreachable, and the server would keep queueing
+                # mouse events into a dead socket.
+                log.warning(f'WS keepalive send failed: {e}')
+                try:
+                    if self._ws:
+                        self._ws.close()
+                except Exception:
+                    pass
+                return
+            time.sleep(25.0)
 
     # ---- server -> helper ----
 

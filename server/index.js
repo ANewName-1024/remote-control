@@ -33,6 +33,8 @@ const PASSWORD_TOKENS = new Map();  // passwordToken -> true (one-time or timed)
 // We count 'recv' on every message parse, 'fwd' on every successful
 // relay. PONGs are NOT counted (they'd dwarf everything).
 const STATS = { totalRecv: 0, totalFwd: 0 };
+// Throttle for [wsraw] raw-receive logs (one per client per 5s).
+const _clientRawLogAt = new Map();
 
 // Ensure upload dir exists
 if (!fs.existsSync(UPLOAD_DIR)) {
@@ -374,7 +376,22 @@ wss.on('connection', (ws, req) => {
     ws.on('message', (data) => {
         try {
             const msg = JSON.parse(data.toString());
-            
+
+            // Raw-receive log for /client connections: any message that
+            // reaches ws.onmessage will be logged here, BEFORE any
+            // try/catch swallowing or auth gating. This is the
+            // "did it ever arrive" checkpoint for "input goes nowhere"
+            // debugging. Throttled to one line per 5s per client to
+            // avoid flooding on mouse move streams.
+            if (path === '/client') {
+                const now = Date.now();
+                const last = _clientRawLogAt.get(clientId) || 0;
+                if (now - last > 5000) {
+                    _clientRawLogAt.set(clientId, now);
+                    console.log(`[wsraw] client ${clientId || '<unauth>'} type=${msg.type} agentId=${msg.agentId || (clientId ? (CLIENTS.get(clientId) || {}).agentId : null)} keys=${Object.keys(msg).join(',')}`);
+                }
+            }
+
             // ----- AGENT CONNECTION -----
             if (path === '/agent') {
                 if (msg.type === 'auth') {
@@ -416,7 +433,22 @@ wss.on('connection', (ws, req) => {
                     console.log(`[PONG] from ${agentId}, lastSeen updated`);
                     return;
                 }
-                
+
+                // Business-level keepalive from the agent. Refreshes
+                // lastSeen on the AGENTS map (same effect as PONG), so
+                // the AGENT_TIMEOUT_CLEANUP loop won't reap an agent
+                // that is actively sending keepalives. Pair this with
+                // the inbound liveness check in the client->agent
+                // relay path (see _isAgentLive) so we never write
+                // mouse/key into a half-dead socket.
+                if (msg.type === 'keepalive') {
+                    const agent = AGENTS.get(agentId);
+                    if (agent) {
+                        agent.lastSeen = Date.now();
+                    }
+                    return;
+                }
+
                 // Handle screen frame
                 if (msg.type === 'screen') {
 
@@ -570,6 +602,27 @@ wss.on('connection', (ws, req) => {
                 if (['mouse', 'key', 'exec', 'file_request', 'clipboard', 'req_kf', 'subscribe', 'ping'].includes(msg.type)) {
                     STATS.totalRecv += 1;
                     const targetAgent = AGENTS.get(client.agentId);
+                    // Liveness gate for input-bearing messages. The agent
+                    // sends a business-level keepalive (see ws.onmessage
+                    // 'keepalive' handler) every 25s once authed. If we
+                    // haven't seen one in 30s, the WS socket is almost
+                    // certainly half-dead (server side still believes it's
+                    // OPEN because Node's ws.send() buffers successfully
+                    // into a dead socket). Drop the message and tell the
+                    // client to re-subscribe, instead of silently
+                    // consuming events that the agent will never see.
+                    if (targetAgent && (msg.type === 'mouse' || msg.type === 'key')) {
+                        const ageMs = Date.now() - (targetAgent.lastSeen || 0);
+                        if (ageMs > 30000) {
+                            console.log(`[relay] DROPPED ${msg.type}: agent ${client.agentId} not live (lastSeen ${Math.round(ageMs/1000)}s ago, no keepalive in window)`);
+                            // Intentionally don't bump totalFwd -- this never
+                            // reached the agent. Tell the client to give up
+                            // and let the user retry instead of pretending
+                            // the message was forwarded.
+                            try { ws.send(JSON.stringify({ type: 'agent_offline', reason: 'keepalive_timeout' })); } catch (e) {}
+                            return;
+                        }
+                    }
                     // Per-relay visibility log. The agent is the one that
                     // actually executes these, so server-side we just need
                     // to confirm we received it from the client and
