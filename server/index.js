@@ -621,6 +621,17 @@ wss.on('connection', (ws, req) => {
                             targetAgent.ws.send(JSON.stringify(msg));
                         }
                     } else {
+                        // 'agent_offline' here is the routing-failure
+                        // signal, not the heartbeat-timeout one. The
+                        // client hasn't bound itself to a target via
+                        // 'subscribe' yet, OR the agent is down. Log
+                        // the distinction so the operator can tell
+                        // them apart from the journal alone.
+                        if (!client.agentId) {
+                            console.log(`[relay] DROPPED ${msg.type} from client ${clientId}: not subscribed to any agent yet`);
+                        } else {
+                            console.log(`[relay] DROPPED ${msg.type} -> agent ${client.agentId}: agent not connected`);
+                        }
                         ws.send(JSON.stringify({ type: 'agent_offline' }));
                     }
                     return;
