@@ -199,12 +199,7 @@ class WSBridge:
                 try:
                     self._on_server_msg(msg)
                 except Exception as e:
-                    # A bug in our message handling should not take
-                    # the whole WS down and force a reconnect. Log
-                    # and continue receiving. The message was lost
-                    # (no real-time delivery guarantee) but the
-                    # connection stays up.
-                    log.warning(f'WS->helper msg handler error (msg={msg.get("type")}): {e}', exc_info=True)
+                    log.warning(f"WS->helper msg handler error: {e}", exc_info=True)
                     continue
             except WebSocketTimeoutException:
                 # No business message in 1h - that's fine, server is alive
@@ -319,7 +314,7 @@ class WSBridge:
         Clients (HTML page, Flutter App) speak the legacy combined
         "type: mouse / key" wire format. The v2 helper, however, splits
         input into separate IPC types (`input_mouse`, `input_key`,
-        `input_hotkey`, `input_type`, ... �?see agent.protocol). We
+        `input_hotkey`, `input_type`, ... — see agent.protocol). We
         translate once on the bridge so any client works regardless of
         whether the server normalizes the wire format.
         """
@@ -347,7 +342,8 @@ class WSBridge:
             # (sent - acked) to detect a server->agent half-close
             # within 5s instead of waiting for the keepalive probe
             # to time out.
-            seq_val = msg.get('seq', 0)
+            if 'seq' in msg:
+                seq_val = msg.get("seq", 0)
                 self._last_input_seq = max(self._last_input_seq, seq_val)
             try:
                 cmd = {
@@ -365,7 +361,8 @@ class WSBridge:
         if t == 'key':
             # keyboard event from remote client (action: down/up/press)
             self.cmds_recv += 1
-            seq_val = msg.get('seq', 0)
+            if 'seq' in msg:
+                seq_val = msg.get("seq", 0)
                 self._last_input_seq = max(self._last_input_seq, seq_val)
             try:
                 cmd = {
