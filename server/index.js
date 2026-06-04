@@ -333,7 +333,7 @@ const wss = new WebSocketServer({ server });
 // Heartbeat interval - also sends websocket pings to agents as keepalive
 setInterval(() => {
     const now = Date.now();
-    
+
     AGENTS.forEach((agent, id) => {
         // Send websocket ping to keep connection alive
         if (agent.ws && agent.ws.readyState === 1) {
@@ -343,16 +343,34 @@ setInterval(() => {
         if (now - agent.lastSeen > 120000) {
             console.log(`[Agent] ${id} heartbeat timeout, removing`);
             AGENTS.delete(id);
+            return;
+        }
+        // INPUT_SEQ_GAP: detect a server->agent half-close. The agent
+        // is acking (so its inbound direction is fine and lastSeen
+        // is fresh) but the seq it's reporting lags far behind what
+        // we sent. That gap is the count of input messages (mouse /
+        // key / exec) that we wrote into a socket that the agent
+        // never read. 50 over a 5s window is roughly 10/s sustained
+        // -- impossible in normal operation since the agent always
+        // processes its own receive queue faster than that.
+        const sent = agent.inputSeq || 0;
+        const acked = agent.lastInputAck || 0;
+        const gap = sent - acked;
+        if (gap > 50) {
+            console.log(`[Agent] ${id} INPUT GAP DETECTED: sent=${sent} acked=${acked} gap=${gap} -- server->agent message frames are being dropped, forcing close+reconnect`);
+            try { agent.ws.close(1000, 'input seq gap'); } catch (e) {}
+            try { agent.ws.terminate(); } catch (e) {}
+            AGENTS.delete(id);
         }
     });
-    
+
     CLIENTS.forEach((client, id) => {
         if (now - client.lastSeen > 120000) {
             console.log(`[Client] ${id} heartbeat timeout, removing`);
             CLIENTS.delete(id);
         }
     });
-}, 30000);
+}, 5000);
 
 // ============================================================
 // Agent WebSocket Handler
@@ -470,6 +488,21 @@ wss.on('connection', (ws, req) => {
                     const agent = AGENTS.get(agentId);
                     if (agent) agent.lastSeen = Date.now();
                     console.log(`[keepalive_ack] from ${agentId} seq=${msg.seq}`);
+                    return;
+                }
+                if (msg.type === 'input_ack') {
+                    // The agent tells us the highest input message seq
+                    // it actually processed. We use this to detect a
+                    // server->agent half-close: if the agent is still
+                    // acking (proving the ws is alive in the inbound
+                    // direction) but the seq it's reporting is far
+                    // behind what we sent, the outbound direction is
+                    // dropping message frames.
+                    const agent = AGENTS.get(agentId);
+                    if (agent) {
+                        agent.lastSeen = Date.now();
+                        agent.lastInputAck = msg.lastSeenSeq || 0;
+                    }
                     return;
                 }
 
@@ -713,6 +746,23 @@ wss.on('connection', (ws, req) => {
                         //   The client (index.html doDownload) already generates
                         //   'dl_' + Date.now() as the session id, so we can keep it.
                         STATS.totalFwd += 1;
+                        // Stamp every input-bearing message (mouse/key/exec/
+                        // file_request/clipboard) with a monotonic input seq
+                        // and remember the last seq we sent. The agent will
+                        // echo back the last seq it actually processed
+                        // (input_ack). If the gap (sent - acked) grows
+                        // beyond a small window we know the outbound
+                        // direction is half-dead: PONGs still flow but
+                        // message frames are being swallowed. This is the
+                        // only signal that reliably catches a silent
+                        // half-close at interactive latencies, since TCP
+                        // backpressure / bufferedAmount / readyState all
+                        // happily lie about a half-closed socket.
+                        if (['mouse', 'key', 'exec', 'file_request', 'clipboard'].includes(msg.type)) {
+                            targetAgent.inputSeq = (targetAgent.inputSeq || 0) + 1;
+                            msg.seq = targetAgent.inputSeq;
+                            msg.lastAck = targetAgent.lastInputAck || 0;
+                        }
                         if (msg.type === 'exec' && msg.cmd) {
                             const sessionId = uuidv4();
                             SESSIONS.set(sessionId, { agentId: client.agentId, clientId, type: 'exec' });

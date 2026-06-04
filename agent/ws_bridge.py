@@ -82,6 +82,11 @@ class WSBridge:
         # monotonically growing total that loses visibility.
         self.cmds_sent = 0
         self._msg_type_stats: dict = {}
+        # Highest input message seq we have actually processed
+        # (mouse/key/exec/...). Server compares to its own counter
+        # every 5s -- a growing gap means the outbound direction is
+        # half-dead and we should close + reconnect.
+        self._last_input_seq: int = 0
         # Reconnect bookkeeping
         self._reconnect_attempt: int = 0
         self._last_connected_at: float = 0.0
@@ -95,7 +100,7 @@ class WSBridge:
 
     def start(self) -> None:
         """Start all bridge threads."""
-        for target in (self._ws_loop, self._frame_pump, self._heartbeat, self._keepalive_loop):
+        for target in (self._ws_loop, self._frame_pump, self._heartbeat, self._keepalive_loop, self._input_ack_loop):
             t = threading.Thread(target=target, daemon=True, name=f'ws-{target.__name__}')
             t.start()
             self._threads.append(t)
@@ -328,6 +333,13 @@ class WSBridge:
         if t == 'mouse':
             # mouse event from remote client (action: down/up/move/click/double_click/wheel)
             self.cmds_recv += 1
+            # Record the highest input seq we have actually processed
+            # for the input_ack feedback loop. Server uses the gap
+            # (sent - acked) to detect a server->agent half-close
+            # within 5s instead of waiting for the keepalive probe
+            # to time out.
+            if 'seq' in msg:
+                self._last_input_seq = max(self._last_input_seq, msg.seq)
             try:
                 cmd = {
                     'type': ipc.MSG_INPUT_MOUSE,
@@ -344,6 +356,8 @@ class WSBridge:
         if t == 'key':
             # keyboard event from remote client (action: down/up/press)
             self.cmds_recv += 1
+            if 'seq' in msg:
+                self._last_input_seq = max(self._last_input_seq, msg.seq)
             try:
                 cmd = {
                     'type': ipc.MSG_INPUT_KEY,
@@ -396,6 +410,34 @@ class WSBridge:
                     self.bytes_sent += body_len
                 except Exception as e:
                     log.warning(f'frame_pump: send failed: {e}')
+
+    def _input_ack_loop(self) -> None:
+        """Send {'type':'input_ack', 'lastSeenSeq': N} every 2s.
+
+        The server stamps every input-bearing message (mouse/key/exec/
+        file_request/clipboard) with a monotonic seq and tracks the
+        highest one it sent. We track the highest one we *actually
+        processed* (in _on_server_msg for mouse/key, ignoring the
+        other types for now since they're not in the interactive
+        mouse-click critical path). The server runs a 5s check:
+        if `sent - acked > 50`, the server->agent direction is
+        dropping message frames and we force-close + reconnect.
+        """
+        while not self._stop.is_set():
+            self._connected.wait(timeout=1.0)
+            if self._stop.is_set():
+                return
+            for _ in range(10):
+                if self._stop.is_set() or self.auth_ok:
+                    break
+                time.sleep(1.0)
+            if self._stop.is_set() or not self.auth_ok:
+                continue
+            try:
+                self._send({'type': 'input_ack', 'lastSeenSeq': self._last_input_seq})
+            except Exception as e:
+                log.warning(f'input_ack send failed: {e}')
+            time.sleep(2.0)
 
     def _heartbeat(self) -> None:
         """Send a periodic pong so the server updates lastSeen."""
