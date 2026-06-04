@@ -201,23 +201,42 @@ class WSBridge:
                 raise
 
     def _keepalive_loop(self) -> None:
+        # Set up round-trip ack machinery. _on_server_msg sets the
+        # event when a 'keepalive_ack' arrives. The seq is a single
+        # element list so _on_server_msg can mutate it without
+        # requiring a lock.
+        self._keepalive_ack = threading.Event()
+        self._keepalive_ack_seq = [0]
+        self._keepalive_seq = 0
+
+        while not self._stop.is_set():
         """Send a small business keepalive every 25s.
 
-        Why: server sends WS protocol pings every 25s (which keep the
-        TCP connection warm and let the agent's recv() notice a dead
-        socket eventually). But the server has no symmetric signal from
-        the agent -- so a half-dead socket (e.g. NAT dropped the
-        outbound but the inbound pings still come from a stale state)
-        leaves the server's `AGENTS.get(id).lastSeen` fresh forever,
-        and `targetAgent.ws.send(mouse)` happily buffers into a socket
-        that the next network write will reset. The mouse frames never
-        reach the agent.
+        Two purposes:
 
-        Sending a business-level keepalive (a real JSON message the
-        server has to actually deliver) catches this: if the socket is
-        half-dead, either the send raises (we re-raise to leave
-        _ws_loop) or the server stops getting the keepalive and clears
-        the agent entry, which the App will see as agent_offline.
+        1. Refresh the server's AGENTS[id].lastSeen so the server's
+           keepalive-timeout gate (and the new socket-fd /
+           bufferedAmount gates) know the agent is alive.
+
+        2. Detect a silent half-close from the agent's side. The
+           server sends WS protocol pings every 10s, which keep the
+           TCP connection warm and let the agent's recv() notice a
+           dead socket eventually. But on the *server* side the same
+           is not symmetric: if server-side network dies, server's
+           AGENTS[id].lastSeen keeps refreshing (the server sees its
+           own outbound ping replies from the dead socket's kernel
+           buffer) but the agent doesn't know the server is gone --
+           agent's _ws.recv() blocks in 3600s timeout forever. The
+           server-restart case (systemctl restart) is the same shape:
+           server dies without sending a WebSocket close frame, the
+           agent's recv() blocks, and ws_loop never reconnects.
+
+        To break this, every 25s the keepalive sends a real JSON
+        message and also lowers the recv() timeout for a moment:
+        the next recv() iteration will time out in 5s, the inner
+        while loop will raise, the outer _ws_loop except block will
+        run, and we'll reconnect. If the socket is actually fine
+        the recv() returns immediately and we go back to 25s.
         """
         while not self._stop.is_set():
             # Wait until _connect() has set the connection event.
@@ -233,7 +252,35 @@ class WSBridge:
             if self._stop.is_set() or not self.auth_ok:
                 continue
             try:
-                self._send({'type': 'keepalive', 'ts': time.time()})
+                # Round-trip probe. The server's keepalive handler
+                # replies with {'type':'keepalive_ack', ts:<our_ts>}.
+                # We block up to 5s for the ack -- if it doesn't come,
+                # the outbound side of the WS is half-dead, and we
+                # raise to force a reconnect. We do this on a
+                # monotonic timestamp so a delayed ack from a previous
+                # cycle (e.g. if the previous keepalive was sent and
+                # then we just missed the ack) doesn't satisfy the
+                # current probe.
+                self._keepalive_seq = getattr(self, '_keepalive_seq', 0) + 1
+                seq = self._keepalive_seq
+                self._send({'type': 'keepalive', 'ts': time.time(), 'seq': seq})
+                # Wait for the matching ack via the event that
+                # _on_server_msg sets. If the socket is dead, the
+                # next recv() iteration in _connect() will block --
+                # but _send() succeeded just now, so the recv() will
+                # return at least one frame eventually. If after
+                # 5s the ack hasn't arrived, force-close so the next
+                # recv() raises ConnectionClosed and the outer
+                # _ws_loop enters its reconnect branch.
+                if not self._keepalive_ack.wait(timeout=5.0):
+                    raise ConnectionError(f'keepalive #{seq}: no ack from server in 5s (server->agent direction is half-dead)')
+                if self._keepalive_ack_seq[0] < seq:
+                    # An older ack arrived but not ours -- treat as
+                    # missing. This happens if the recv() loop in
+                    # _connect() is running far behind the keepalive
+                    # cadence, in which case the WS is also
+                    # effectively degraded.
+                    raise ConnectionError(f'keepalive #{seq}: ack seq mismatch (got {self._keepalive_ack_seq[0]})')
             except Exception as e:
                 # The send is over a half-dead socket. Re-raise so
                 # _ws_loop can be killed by this same exception; the
@@ -270,6 +317,14 @@ class WSBridge:
             self._msg_type_stats[t] = self._msg_type_stats.get(t, 0) + 1
         if t in ('auth_ok', 'auth_failed', 'agent_offline', 'error', 'client_connected', 'client_disconnected'):
             log.info(f'WS: {t}: {msg}')
+            return
+        if t == 'keepalive_ack':
+            # Round-trip response from server. _keepalive_loop is
+            # blocked on this Event. Wake it up so it can check the
+            # seq matches the one it just sent.
+            seq = msg.get('seq', 0)
+            self._keepalive_ack_seq[0] = max(self._keepalive_ack_seq[0], seq)
+            self._keepalive_ack.set()
             return
         if t == 'mouse':
             # mouse event from remote client (action: down/up/move/click/double_click/wheel)

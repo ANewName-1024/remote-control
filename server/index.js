@@ -441,10 +441,23 @@ wss.on('connection', (ws, req) => {
                 // the inbound liveness check in the client->agent
                 // relay path (see _isAgentLive) so we never write
                 // mouse/key into a half-dead socket.
+                //
+                // We also send back a {'type':'keepalive_ack'} so the
+                // agent gets a round-trip signal: if the underlying
+                // WS is half-dead on the outbound direction (server
+                // can't actually deliver to agent), the agent won't
+                // see the ack and can close + reconnect on its own.
+                // Without this, a server-side silent half-close would
+                // freeze the agent's _ws.recv() until 3600s timeout.
                 if (msg.type === 'keepalive') {
                     const agent = AGENTS.get(agentId);
                     if (agent) {
                         agent.lastSeen = Date.now();
+                        try {
+                            if (agent.ws.readyState === 1) {
+                                agent.ws.send(JSON.stringify({ type: 'keepalive_ack', ts: msg.ts }));
+                            }
+                        } catch (e) {}
                     }
                     return;
                 }
@@ -780,8 +793,40 @@ server.listen(PORT, () => {
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\nShutting down...');
-    wss.close();
-    server.close();
-    process.exit(0);
+    console.log('\nShutting down (SIGINT)...');
+    _gracefulShutdown('SIGINT');
 });
+
+// SIGTERM (systemctl restart / stop) is the one that actually
+// matters in production. Without this, systemd's restart just
+// hard-closes the listening socket; the open WebSockets get a TCP
+// RST instead of a WebSocket close frame, so the agent's
+// _ws.recv() blocks forever in its 3600s timeout and the agent
+// never reconnects. systemd's Stop=6s+SIGKILL policy means we
+// have very little time to do this cleanly -- so we don't wait for
+// the agent to ack, we just fire the close and exit.
+process.on('SIGTERM', () => {
+    console.log('Shutting down (SIGTERM)...');
+    _gracefulShutdown('SIGTERM');
+});
+
+function _gracefulShutdown(signal) {
+    let count = 0;
+    try {
+        for (const a of AGENTS.values()) {
+            try { a.ws.close(1001, 'server ' + signal); } catch (e) {}
+            count++;
+        }
+        for (const c of CLIENTS.values()) {
+            try { c.ws.close(1001, 'server ' + signal); } catch (e) {}
+            count++;
+        }
+    } catch (e) {}
+    console.log(`Sent WebSocket close to ${count} peers; exiting.`);
+    try { wss.close(); } catch (e) {}
+    try { server.close(); } catch (e) {}
+    // Force exit after a brief grace period even if close()
+    // doesn't trigger the listening socket close (which is the
+    // typical Node.js behavior on Linux).
+    setTimeout(() => process.exit(0), 500).unref();
+}
