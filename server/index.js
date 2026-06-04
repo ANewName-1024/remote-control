@@ -456,9 +456,20 @@ wss.on('connection', (ws, req) => {
                         try {
                             if (agent.ws.readyState === 1) {
                                 agent.ws.send(JSON.stringify({ type: 'keepalive_ack', ts: msg.ts }));
+                                console.log(`[keepalive] from ${agentId} seq=${msg.seq} ack_sent`);
                             }
                         } catch (e) {}
                     }
+                    return;
+                }
+                if (msg.type === 'keepalive_ack') {
+                    // Diagnostic: the server-side _send might appear to
+                    // succeed but the agent never sees the ack. Log the
+                    // ack arrival here as the other half of the round
+                    // trip so a half-dead socket is observable in logs.
+                    const agent = AGENTS.get(agentId);
+                    if (agent) agent.lastSeen = Date.now();
+                    console.log(`[keepalive_ack] from ${agentId} seq=${msg.seq}`);
                     return;
                 }
 
