@@ -13,6 +13,7 @@ $tests = @(
     @{ Name = 'test_path_security.js (Path security, 16 asserts)'; Cmd = 'node'; Args = @('test_path_security.js') },
     @{ Name = 'test_http_api.js (HTTP REST API, 29 asserts)'; Cmd = 'node'; Args = @('test_http_api.js') },
     @{ Name = 'test_ws_protocol.js (WebSocket protocol, 14 asserts)'; Cmd = 'node'; Args = @('test_ws_protocol.js') },
+    @{ Name = 'test_diag.js (App diag dump, 36 asserts)'; Cmd = 'node'; Args = @('test_diag.js') },
     @{ Name = 'test_e2e_flow.js (End-to-end, 24 asserts)'; Cmd = 'node'; Args = @('test_e2e_flow.js') }
 )
 

@@ -127,7 +127,6 @@
 | F9 | 黑屏（PowerShell SendMessage） | `blankScreen` | `e2e` T06（exec 分支） | P2 |
 
 ### G. 安全加固（独立成节，方便回归）
-
 | ID | 加固项 | 测试 | 优先级 |
 |----|--------|------|--------|
 | G1 | Static Deploy Bearer 鉴权 | `smoke` T01-T02, `path_security` T11 | P0 |
@@ -137,6 +136,29 @@
 | G5 | 异步 I/O（不阻塞事件循环） | `http_api` T16（列出 1000 文件） | P1 |
 | G6 | 列表深度限制 8 层 | `path_security` T12 | P1 |
 | G7 | WebSocket 密码失败立即 close | `ws_protocol` T09 | P0 |
+
+### H. App 诊断日志主动上传（Flutter App → server → `DIAG_DIR`）
+
+| ID | 功能点 | 端点 | 测试 | 类型 | 优先级 |
+|----|--------|------|------|------|--------|
+| H1 | Client 发 `app_diag` 落盘 + ack | `WS /client` | `diag` T01 (D1) | I | P0 |
+| H2 | 多次上传不同 trigger 不互相覆盖 | `WS /client` | `diag` T02 (D2) | I | P0 |
+| H3 | 空 `logs` 被拒（不创建空文件） | `WS /client` | `diag` T03 (D3) | I | P0 |
+| H4 | `GET /api/diag` 列出所有 agent + 文件 | `GET /api/diag` | `diag` T04 (D4) | I | P0 |
+| H5 | `GET /api/diag/latest` 返回最近 dump | `GET /api/diag/latest` | `diag` T05 (D5) | I | P0 |
+| H6 | `GET /api/diag/download` 流式返回原文件 | `GET /api/diag/download` | `diag` T06 (D6) | I | P0 |
+| H7 | agentId 路径穿越阻断（`..`/斜杠） | `GET /api/diag/*` | `diag` T07 (D7) | I | P0 |
+| H8 | `?agentId=X` 过滤 | `GET /api/diag` | `diag` T08 (D8) | I | P1 |
+| H9 | 未鉴权 client 的 `app_diag` 被拒 | `WS /client` | `diag` T09 (D9) | I | P0 |
+| H10 | `app_diag` HTTP 端点需 Bearer 鉴权 | `GET /api/diag*` | `diag` T04 (D4 第一条) | I | P0 |
+| H11 | 超过 `DIAG_MAX_BYTES` 截断到尾部 | `WS /client` | （由代码逻辑覆盖，未单独跑） | I | P1 |
+| H12 | trigger / appVersion / context 落 sidecar JSON | `WS /client` | `diag` T01 (D1) | I | P0 |
+
+### 踩过的坑（仅作记录，避免下次重犯）
+
+- **测试端口**：`run_all_tests.ps1` 改过 `test_diag.js` 串行独享 21997（不要并行跑会撞 DIAG_DIR 的创建）
+- **PowerShell + Node.js 退出码**：Node 把 `[Diag] rejected empty upload from client ?` 打到 stderr，PowerShell 转换成非零退出码但测试本身是 0。判断成败只看 `=== N passed, 0 failed ===`，不要看 `$LASTEXITCODE`。
+- **`_noagent` 子目录**：当 client 还没 `subscribe` 到任何 agent 就发 `app_diag`，server 落 `_noagent/`（而不是“漏了 agentId 就拒了”）。这是有意的：用户在连接到主机列表后即点 “上传日志” 需要有路径落地。
 
 ---
 
@@ -236,7 +258,7 @@ cd D:\.openclaw\workspace\projects\devtools\remote-control
 
 ## 六、测试覆盖率声明
 
-按 `SPEC.md` / `AGENT.md` 的功能点，**119 个断言**覆盖：
+按 `SPEC.md` / `AGENT.md` 的功能点，**155 个断言**覆盖：
 
 - ✅ Server HTTP API：100% 端点（A1-A9）
 - ✅ Static Deploy 安全：100% 攻击面（B1-B12）
@@ -245,6 +267,7 @@ cd D:\.openclaw\workspace\projects\devtools\remote-control
 - ✅ Delta Encoder：100% 关键路径（E1-E10）
 - ✅ Web Client：通过 server 端验证 100% 关键行为（F1-F7）
 - ✅ 安全加固：100% 关键项（G1-G7）
+- ✅ App 诊断日志主动上传：100% 端点 + 拦截面（H1-H12，含 36 个独立断言）
 
 **未覆盖**（手动 / E2E 真机验证）：
 - Web Client 的 UI 渲染、canvas 绘制

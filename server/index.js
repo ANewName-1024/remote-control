@@ -22,6 +22,18 @@ const multer = require('multer');
 
 const PORT = process.env.PORT || 21112;
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
+// Diag dump dir: the Flutter App proactively uploads its on-device
+// log file to /client (via the 'app_diag' WS message). Server
+// writes each upload to DIAG_DIR/<agentId-or-_noagent>/<ts>-<trigger>.log
+// so the operator can `tail -f` recent activity without needing
+// USB access to the phone. Same access password as the rest of
+// the API -- these logs may contain the user's host/agent id and
+// shouldn't be world-readable.
+const DIAG_DIR = process.env.DIAG_DIR || path.join(__dirname, 'agent_logs');
+const DIAG_MAX_BYTES = 1024 * 1024;  // 1MB per upload -- sanity cap; 256KB typical
+if (!fs.existsSync(DIAG_DIR)) {
+    fs.mkdirSync(DIAG_DIR, { recursive: true });
+}
 const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'Ops@2024!';  // 默认密码，可通过环境变量修改
 const AGENTS = new Map();   // agentId -> { ws, info, lastSeen }
 const CLIENTS = new Map();  // clientId -> { ws, agentId, info }
@@ -325,6 +337,113 @@ app.delete('/api/files/:filename', (req, res) => {
 });
 
 // ============================================================
+// Diag dump API (Flutter App -> server -> DIAG_DIR)
+// ============================================================
+// Password-protected (same as /api/agents). Lists / downloads the
+// on-device log dumps the App proactively uploads. Each dump is
+// a `<agentId>/<ts>-<trigger>.log` pair with a sidecar `.json`.
+//
+// Layout example:
+//   DIAG_DIR/
+//     WEI3216/
+//       2026-06-05T07-34-12-123Z-auto.log
+//       2026-06-05T07-34-12-123Z-auto.json
+//       2026-06-05T07-39-12-456Z-periodic.log
+//       ...
+//     _noagent/                    # user clicked Upload before binding
+//       2026-06-05T08-01-00-000Z-manual.log
+//
+// The 'trigger' suffix lets `ls DIAG_DIR/agent/ | sort` surface
+// error dumps first (lexically 'error' < 'manual' < 'periodic').
+
+// GET /api/diag - List all diag dumps, optionally filtered by agentId
+// Returns: { agents: [{ agentId, files: [{ name, bytes, mtime, meta? }] }] }
+app.get('/api/diag', requireDeployAuth, async (req, res) => {
+    try {
+        const filter = req.query.agentId ? _safeAgentDirName(req.query.agentId) : null;
+        const agents = [];
+        const entries = await fs.promises.readdir(DIAG_DIR, { withFileTypes: true });
+        for (const e of entries) {
+            if (!e.isDirectory()) continue;
+            if (filter && e.name !== filter) continue;
+            const dir = path.join(DIAG_DIR, e.name);
+            const files = [];
+            let names;
+            try { names = await fs.promises.readdir(dir); } catch (err) { continue; }
+            for (const n of names) {
+                if (!n.endsWith('.log')) continue;
+                const stat = await fs.promises.stat(path.join(dir, n));
+                const metaPath = path.join(dir, n.replace(/\.log$/, '.json'));
+                let meta = null;
+                try { meta = JSON.parse(await fs.promises.readFile(metaPath, 'utf8')); } catch (err) { /* sidecar missing is fine */ }
+                files.push({
+                    name: n,
+                    bytes: stat.size,
+                    mtime: stat.mtime.toISOString(),
+                    meta,
+                });
+            }
+            files.sort((a, b) => b.mtime.localeCompare(a.mtime));
+            agents.push({ agentId: e.name, files });
+        }
+        agents.sort((a, b) => a.agentId.localeCompare(b.agentId));
+        res.json({ agents, totalFiles: agents.reduce((s, a) => s + a.files.length, 0) });
+    } catch (err) {
+        console.error('[Diag] list failed:', err);
+        res.status(500).json({ error: 'list failed' });
+    }
+});
+
+// GET /api/diag/latest?agentId=xxx - Get the most recent .log
+// for an agent, plus its sidecar meta. Returns 404 if no uploads
+// yet for that agent.
+app.get('/api/diag/latest', requireDeployAuth, async (req, res) => {
+    try {
+        const agentId = _safeAgentDirName(req.query.agentId);
+        const dir = path.join(DIAG_DIR, agentId);
+        const names = await fs.promises.readdir(dir).catch(() => []);
+        const logs = names.filter(n => n.endsWith('.log')).sort().reverse();
+        if (logs.length === 0) return res.status(404).json({ error: 'no diag files' });
+        const latest = logs[0];
+        const stat = await fs.promises.stat(path.join(dir, latest));
+        const meta = JSON.parse(await fs.promises.readFile(path.join(dir, latest.replace(/\.log$/, '.json')), 'utf8').catch(() => 'null'));
+        res.json({ agentId, name: latest, bytes: stat.size, mtime: stat.mtime.toISOString(), meta });
+    } catch (err) {
+        console.error('[Diag] latest failed:', err);
+        res.status(500).json({ error: 'latest failed' });
+    }
+});
+
+// GET /api/diag/download?agentId=xxx&name=yyy - Stream the raw .log
+// file. name is path.basename'd twice (once in the query parser, once
+// in the agentId sanitizer) to ensure the resulting path stays
+// inside DIAG_DIR/<agentId>/. We don't allow directory traversal to
+// leak files outside the per-agent folder.
+app.get('/api/diag/download', requireDeployAuth, async (req, res) => {
+    try {
+        const agentId = _safeAgentDirName(req.query.agentId);
+        const name = path.basename(String(req.query.name || ''));
+        if (!name || !name.endsWith('.log')) {
+            return res.status(400).json({ error: 'name (.log) required' });
+        }
+        const filePath = path.join(DIAG_DIR, agentId, name);
+        // Defense in depth: confirm filePath is still under the per-agent dir.
+        const agentDir = path.join(DIAG_DIR, agentId);
+        const rootWithSep = agentDir.endsWith(path.sep) ? agentDir : agentDir + path.sep;
+        if (filePath !== agentDir && !filePath.startsWith(rootWithSep)) {
+            return res.status(403).json({ error: 'path traversal blocked' });
+        }
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'file not found' });
+        }
+        res.download(filePath, name);
+    } catch (err) {
+        console.error('[Diag] download failed:', err);
+        res.status(500).json({ error: 'download failed' });
+    }
+});
+
+// ============================================================
 // WebSocket Server (Socket.IO compatible)
 // ============================================================
 
@@ -372,6 +491,93 @@ setInterval(() => {
         }
     });
 }, 5000);
+
+// Sanitize an agentId for use as a subdirectory name. The agentId
+// is set by the agent itself, so a malicious or buggy client
+// could submit "../etc" or "foo/bar" -- strip path separators
+// and any traversal pattern. Falls back to '_noagent' if empty
+// (e.g. user clicked Upload before binding to an agent).
+function _safeAgentDirName(agentId) {
+    if (typeof agentId !== 'string' || agentId.length === 0) return '_noagent';
+    // Strip NUL + control chars first so path.join doesn't choke.
+    const cleaned = agentId.replace(/[\x00-\x1f]/g, '');
+    // Replace any character that could break a path component
+    // with '_'. Allows [A-Za-z0-9._-] which covers the normal
+    // hostname + UUID-style ids the agent generates.
+    const safe = cleaned.replace(/[^A-Za-z0-9._-]/g, '_');
+    return safe.length > 0 ? safe : '_noagent';
+}
+
+// Sanitize a 'trigger' string for use as part of a filename.
+function _safeTriggerName(trigger) {
+    if (typeof trigger !== 'string' || trigger.length === 0) return 'unknown';
+    return trigger.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32) || 'unknown';
+}
+
+// Save an app_diag upload to disk. Layout:
+//   DIAG_DIR/<agentId>/<timestamp>-<trigger>.log   -- the log text
+//   DIAG_DIR/<agentId>/<timestamp>-<trigger>.json  -- metadata sidecar
+// Returns { ok, path, error? }. Always acks the client with
+// { type: 'diag_ack', ok, path } so the App's UI can surface a
+// 'uploaded' / 'failed' toast (App only logs "queued" today;
+// ack is wired so we can upgrade later without a wire change).
+async function _handleAppDiag(ws, client, msg) {
+    try {
+        const agentId = _safeAgentDirName(client.agentId);
+        const trigger = _safeTriggerName(msg.trigger || 'unknown');
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const dir = path.join(DIAG_DIR, agentId);
+        await fs.promises.mkdir(dir, { recursive: true });
+        const base = `${ts}-${trigger}`;
+        const logPath = path.join(dir, `${base}.log`);
+        const metaPath = path.join(dir, `${base}.json`);
+
+        const logs = typeof msg.logs === 'string' ? msg.logs : '';
+        if (logs.length === 0) {
+            // Empty upload is rejected -- otherwise a buggy client
+            // could flood DIAG_DIR with empty files. The App's
+            // logger should always have *something* by the time
+            // the user can click Upload.
+            console.warn(`[Diag] rejected empty upload from client ${client.id || '?'}`);
+            try { ws.send(JSON.stringify({ type: 'diag_ack', ok: false, error: 'empty' })); } catch (e) {}
+            return;
+        }
+        if (logs.length > DIAG_MAX_BYTES) {
+            // Truncate to last DIAG_MAX_BYTES bytes (newline-aligned
+            // where possible so we don't cut a log line in half).
+            // Better to keep the most recent activity than to
+            // reject outright -- the periodic 5min timer is the
+            // main case that could grow this; it dumps the full
+            // file log so on a busy session we may exceed.
+            const overflow = logs.length - DIAG_MAX_BYTES;
+            let start = overflow;
+            const nl = logs.indexOf('\n', start);
+            if (nl >= 0 && nl < overflow + 200) start = nl + 1;
+            console.warn(`[Diag] truncated: ${logs.length} > ${DIAG_MAX_BYTES} bytes (kept tail)`);
+            const truncated = logs.slice(start);
+            await fs.promises.writeFile(logPath, truncated, 'utf8');
+        } else {
+            await fs.promises.writeFile(logPath, logs, 'utf8');
+        }
+        const meta = {
+            receivedAt: new Date().toISOString(),
+            agentId: client.agentId || null,
+            clientId: client.id || null,
+            trigger,
+            appVersion: msg.appVersion || null,
+            platform: msg.platform || null,
+            capturedAt: msg.capturedAt || null,
+            bytes: logs.length,
+            context: msg.context || null,
+        };
+        await fs.promises.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+        console.log(`[Diag] saved ${logPath} (${logs.length} bytes, trigger=${trigger})`);
+        try { ws.send(JSON.stringify({ type: 'diag_ack', ok: true, path: logPath, bytes: logs.length })); } catch (e) {}
+    } catch (err) {
+        console.error('[Diag] save failed:', err.message);
+        try { ws.send(JSON.stringify({ type: 'diag_ack', ok: false, error: err.message })); } catch (e) {}
+    }
+}
 
 // ============================================================
 // Agent WebSocket Handler
@@ -652,7 +858,33 @@ wss.on('connection', (ws, req) => {
                 // Update last seen
                 const client = CLIENTS.get(clientId);
                 if (client) client.lastSeen = Date.now();
-                
+
+                // ---- App diagnostic log upload (Flutter App -> server) ----
+                // NOT forwarded to the agent: the agent is the Windows
+                // desktop, the diag is the phone's log file. The agent
+                // has no use for it; the server is the natural
+                // collector. Save to DIAG_DIR/<agentId>/<ts>-<trigger>.log
+                // (or <_noagent>/ if the user hasn't bound to an
+                // agent yet -- e.g. they hit "Upload Logs" right
+                // after the auth_ok landing screen). Metadata goes
+                // into a sidecar <same-stem>.json so the operator
+                // can see trigger / appVersion / context without
+                // opening the log file.
+                if (msg.type === 'app_diag') {
+                    // Fire-and-forget: _handleAppDiag acks the
+                    // client itself and writes to disk async. The
+                    // outer 'message' handler is sync (Node ws
+                    // doesn't deliver messages in async order
+                    // without explicit queuing), so we just kick
+                    // off the work and return. Errors inside
+                    // _handleAppDiag are caught and turned into
+                    // a diag_ack, so nothing escapes.
+                    _handleAppDiag(ws, client, msg).catch(err => {
+                        console.error('[Diag] unhandled:', err.message);
+                    });
+                    return;
+                }
+
                 // Forward commands to agent
                 // Also forward 'req_kf' (keyframe request from client) so
                 // the agent can immediately push a fresh kf instead of
