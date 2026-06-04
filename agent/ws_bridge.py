@@ -201,15 +201,6 @@ class WSBridge:
                 raise
 
     def _keepalive_loop(self) -> None:
-        # Set up round-trip ack machinery. _on_server_msg sets the
-        # event when a 'keepalive_ack' arrives. The seq is a single
-        # element list so _on_server_msg can mutate it without
-        # requiring a lock.
-        self._keepalive_ack = threading.Event()
-        self._keepalive_ack_seq = [0]
-        self._keepalive_seq = 0
-
-        while not self._stop.is_set():
         """Send a small business keepalive every 25s.
 
         Two purposes:
@@ -238,6 +229,14 @@ class WSBridge:
         run, and we'll reconnect. If the socket is actually fine
         the recv() returns immediately and we go back to 25s.
         """
+        # Set up round-trip ack machinery. _on_server_msg sets the
+        # event when a 'keepalive_ack' arrives. The seq is a single
+        # element list so _on_server_msg can mutate it without
+        # requiring a lock.
+        self._keepalive_ack = threading.Event()
+        self._keepalive_ack_seq = [0]
+        self._keepalive_seq = 0
+
         while not self._stop.is_set():
             # Wait until _connect() has set the connection event.
             self._connected.wait(timeout=1.0)
