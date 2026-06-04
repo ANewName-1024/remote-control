@@ -339,28 +339,29 @@ setInterval(() => {
         if (agent.ws && agent.ws.readyState === 1) {
             try { agent.ws.ping(); } catch (e) {}
         }
-        // Check timeout (2 minutes for agents)
+        // Check timeout (2 minutes for agents) -- pass-through
+        // detection: if the agent has been silent for 2 minutes,
+        // give up on it. NOT a 30s flash-disconnect -- 2 minutes
+        // is long enough that any legitimate drop (sleep, network
+        // blip, OS hibernation) will have self-recovered. We do
+        // NOT close on smaller gaps because mid-test the user is
+        // actively working and we don't want a 1-2s blip on the
+        // App side to drop their in-progress drag.
         if (now - agent.lastSeen > 120000) {
-            console.log(`[Agent] ${id} heartbeat timeout, removing`);
+            console.log(`[Agent] ${id} heartbeat timeout (no signal in 120s), removing`);
             AGENTS.delete(id);
-            return;
         }
-        // INPUT_SEQ_GAP: detect a server->agent half-close. The agent
-        // is acking (so its inbound direction is fine and lastSeen
-        // is fresh) but the seq it's reporting lags far behind what
-        // we sent. That gap is the count of input messages (mouse /
-        // key / exec) that we wrote into a socket that the agent
-        // never read. 50 over a 5s window is roughly 10/s sustained
-        // -- impossible in normal operation since the agent always
-        // processes its own receive queue faster than that.
+        // INPUT_SEQ_GAP: log only, do NOT force reconnect. We
+        // discovered that any proactive close mid-session causes
+        // the App's coordinate mapping / scale reference to
+        // reset, and the next user click lands in the wrong
+        // place. Better to keep the half-dead socket and let
+        // the user restart the App if it gets really stuck.
         const sent = agent.inputSeq || 0;
         const acked = agent.lastInputAck || 0;
         const gap = sent - acked;
         if (gap > 50) {
-            console.log(`[Agent] ${id} INPUT GAP DETECTED: sent=${sent} acked=${acked} gap=${gap} -- server->agent message frames are being dropped, forcing close+reconnect`);
-            try { agent.ws.close(1000, 'input seq gap'); } catch (e) {}
-            try { agent.ws.terminate(); } catch (e) {}
-            AGENTS.delete(id);
+            console.log(`[Agent] ${id} input seq gap: sent=${sent} acked=${acked} gap=${gap} (no auto-reconnect to avoid coordinate-mapping reset)`);
         }
     });
 
@@ -691,24 +692,31 @@ wss.on('connection', (ws, req) => {
                         // `recv()` shows nothing. Inspect both the
                         // socket fd and the bufferedAmount to catch
                         // this before sending the next message.
+                        // Check the underlying TCP socket. Node's `ws`
+                        // exposes `readyState=1` for a long time after
+                        // the OS has actually half-closed the socket:
+                        // PING/PONG control frames still flow (the ws
+                        // library handles those at a lower layer than
+                        // send()'s message queue) but application
+                        // message frames stop being delivered. The
+                        // signature is: send queue grows unbounded
+                        // (`ws.bufferedAmount`) while agent-side
+                        // `recv()` shows nothing. Inspect both the
+                        // socket fd and the bufferedAmount to catch
+                        // this -- but DO NOT force-close: any proactive
+                        // close mid-session resets the App's coordinate
+                        // mapping / scale reference and the next user
+                        // click lands in the wrong place. Drop this
+                        // single message and let the next one try.
                         const sock = targetAgent.ws._socket;
                         if (!sock || sock.destroyed || !sock.writable || !sock.readable) {
-                            console.log(`[relay] DROPPED ${msg.type}: agent ${client.agentId} socket fd looks dead (destroyed=${sock && sock.destroyed} writable=${sock && sock.writable} readable=${sock && sock.readable})`);
-                            try { ws.send(JSON.stringify({ type: 'agent_offline', reason: 'socket_dead' })); } catch (e) {}
-                            try { targetAgent.ws.terminate(); } catch (e) {}
-                            AGENTS.delete(client.agentId);
+                            console.log(`[relay] DROPPED ${msg.type}: agent ${client.agentId} socket fd looks dead (destroyed=${sock && sock.destroyed} writable=${sock && sock.writable} readable=${sock && sock.readable}) -- dropping message, NOT closing (avoid coordinate-mapping reset)`);
+                            STATS.totalFwd -= 1;
                             return;
                         }
                         if (targetAgent.ws.bufferedAmount > 1024 * 1024) {
-                            // >1MB queued. Either the agent is GC-paused
-                            // for a long time, or it stopped calling
-                            // recv(). Either way, the next event will
-                            // never get out in interactive time. Drop
-                            // and force a reconnect.
-                            console.log(`[relay] DROPPED ${msg.type}: agent ${client.agentId} send queue backed up (bufferedAmount=${targetAgent.ws.bufferedAmount} bytes)`);
-                            try { ws.send(JSON.stringify({ type: 'agent_offline', reason: 'send_queue_backed_up' })); } catch (e) {}
-                            try { targetAgent.ws.terminate(); } catch (e) {}
-                            AGENTS.delete(client.agentId);
+                            console.log(`[relay] DROPPED ${msg.type}: agent ${client.agentId} send queue backed up (bufferedAmount=${targetAgent.ws.bufferedAmount} bytes) -- dropping message, NOT closing (avoid coordinate-mapping reset)`);
+                            STATS.totalFwd -= 1;
                             return;
                         }
                     }

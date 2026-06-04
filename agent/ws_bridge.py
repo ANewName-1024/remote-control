@@ -100,7 +100,7 @@ class WSBridge:
 
     def start(self) -> None:
         """Start all bridge threads."""
-        for target in (self._ws_loop, self._frame_pump, self._heartbeat, self._keepalive_loop, self._input_ack_loop):
+        for target in (self._ws_loop, self._frame_pump, self._heartbeat, self._keepalive_loop):
             t = threading.Thread(target=target, daemon=True, name=f'ws-{target.__name__}')
             t.start()
             self._threads.append(t)
@@ -290,20 +290,18 @@ class WSBridge:
                     # effectively degraded.
                     raise ConnectionError(f'keepalive #{seq}: ack seq mismatch (got {self._keepalive_ack_seq[0]})')
             except Exception as e:
-                # The send is over a half-dead socket. Re-raise so
-                # _ws_loop can be killed by this same exception; the
-                # outer reconnect loop will then re-establish a clean
-                # connection. Without this, we'd silently keep
-                # 'connecting' in lastSeen while the agent is
-                # unreachable, and the server would keep queueing
-                # mouse events into a dead socket.
-                log.warning(f'WS keepalive send failed: {e}')
-                try:
-                    if self._ws:
-                        self._ws.close()
-                except Exception:
-                    pass
-                return
+                # The keepalive probe failed (no ack, or seq
+                # mismatch). Log it for diagnosis. We used to
+                # close the socket and force a reconnect here, but
+                # we discovered that any proactive close mid-session
+                # resets the App's coordinate mapping / scale
+                # reference -- the next user click lands in the
+                # wrong place. So now we just log and let the
+                # outer _ws_loop keep running. If the WS is
+                # actually broken, the recv() will eventually raise
+                # on its own and trigger a natural reconnect.
+                log.warning(f'WS keepalive probe failed (continuing, no auto-reconnect to avoid coordinate-mapping reset): {e}')
+                self._keepalive_ack.clear()
             time.sleep(25.0)
 
     # ---- server -> helper ----
@@ -417,33 +415,6 @@ class WSBridge:
                 except Exception as e:
                     log.warning(f'frame_pump: send failed: {e}')
 
-    def _input_ack_loop(self) -> None:
-        """Send {'type':'input_ack', 'lastSeenSeq': N} every 2s.
-
-        The server stamps every input-bearing message (mouse/key/exec/
-        file_request/clipboard) with a monotonic seq and tracks the
-        highest one it sent. We track the highest one we *actually
-        processed* (in _on_server_msg for mouse/key, ignoring the
-        other types for now since they're not in the interactive
-        mouse-click critical path). The server runs a 5s check:
-        if `sent - acked > 50`, the server->agent direction is
-        dropping message frames and we force-close + reconnect.
-        """
-        while not self._stop.is_set():
-            self._connected.wait(timeout=1.0)
-            if self._stop.is_set():
-                return
-            for _ in range(10):
-                if self._stop.is_set() or self.auth_ok:
-                    break
-                time.sleep(1.0)
-            if self._stop.is_set() or not self.auth_ok:
-                continue
-            try:
-                self._send({'type': 'input_ack', 'lastSeenSeq': self._last_input_seq})
-            except Exception as e:
-                log.warning(f'input_ack send failed: {e}')
-            time.sleep(2.0)
 
     def _heartbeat(self) -> None:
         """Send a periodic pong so the server updates lastSeen."""

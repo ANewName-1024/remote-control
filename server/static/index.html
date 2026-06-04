@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>远程控制台</title>
+    <title>Remote Control v1.1-20260603</title>
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
         :root{--bg:#0f0f0f;--panel:#1a1a1a;--border:#2a2a2a;--text:#e0e0e0;--text-dim:#888;--accent:#00d4aa;--danger:#ff4444;--success:#44ff88}
@@ -240,7 +240,9 @@ const S = {
     pendingMachineId: null
 };
 
-let canvas = null, container = null;
+let canvas = document.getElementById('screen');
+let container = document.getElementById('ctrlContainer');
+console.log('[v1.1-20260603] init canvas=', !!canvas, 'container=', !!container, 'canvas_size=', canvas && canvas.width, 'x', canvas && canvas.height);
 
 // ============ Init ============
 window.onload = () => {
@@ -538,19 +540,27 @@ function renderDeltaFrame(msg) {
 
 // ============ Input Handling ============
 function getPos(e) {
+    // Map client (CSS) coords → canvas buffer coords.
+    // getBoundingClientRect() already includes CSS transform: scale(zoom) effect,
+    // so canvas.width / r.width is the correct scale (NOT /S.zoom).
     const r = canvas.getBoundingClientRect();
-    return {x: Math.round((e.clientX-r.left)/S.zoom), y: Math.round((e.clientY-r.top)/S.zoom)};
+    const sx = canvas.width / r.width;
+    const sy = canvas.height / r.height;
+    return {x: Math.round((e.clientX-r.left)*sx), y: Math.round((e.clientY-r.top)*sy)};
 }
 function getTouchPos(t) {
     const r = canvas.getBoundingClientRect();
-    return {x: Math.round((t.clientX-r.left)/S.zoom), y: Math.round((t.clientY-r.top)/S.zoom)};
+    const sx = canvas.width / r.width;
+    const sy = canvas.height / r.height;
+    return {x: Math.round((t.clientX-r.left)*sx), y: Math.round((t.clientY-r.top)*sy)};
 }
 
-container.addEventListener('mousedown', e => { if(!S.connected)return; e.preventDefault(); const p=getPos(e); send({type:'mouse',action:'down',x:p.x,y:p.y,button:e.button===2?'right':'left'}); });
+container.addEventListener('mousedown', e => { if(!S.connected)return; e.preventDefault(); const p=getPos(e); console.log('[input] mousedown client',e.clientX,e.clientY,'-> buf',p.x,p.y); send({type:'mouse',action:'down',x:p.x,y:p.y,button:e.button===2?'right':'left'}); });
 container.addEventListener('mouseup', e => { if(!S.connected)return; const p=getPos(e); send({type:'mouse',action:'up',x:p.x,y:p.y,button:e.button===2?'right':'left'}); });
 container.addEventListener('mousemove', e => { if(!S.connected)return; const p=getPos(e); send({type:'mouse',action:'move',x:p.x,y:p.y}); });
 container.addEventListener('contextmenu', e => e.preventDefault());
-container.addEventListener('wheel', e => { if(!S.connected)return; e.preventDefault(); const p=getPos(e); send({type:'mouse',action:'wheel',x:p.x,y:p.y,deltaY:e.deltaY>0?1:-1}); },{passive:false});
+container.addEventListener('wheel', e => { if(!S.connected)return; e.preventDefault(); const p=getPos(e); send({type:'mouse',action:'wheel',x:p.x,y:p.y,deltaY:e.deltaY>0?1:-1}); },{passive:false}); // wheel uses fixed 1/-1 (server clamps)
+function _noDebug(){}
 
 let lastTouch = null;
 container.addEventListener('touchstart', e => { if(!S.connected)return; e.preventDefault(); const p=getTouchPos(e.touches[0]); lastTouch=p; send({type:'mouse',action:'down',x:p.x,y:p.y,button:'left'}); },{passive:false});
