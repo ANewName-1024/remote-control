@@ -622,6 +622,38 @@ wss.on('connection', (ws, req) => {
                             try { ws.send(JSON.stringify({ type: 'agent_offline', reason: 'keepalive_timeout' })); } catch (e) {}
                             return;
                         }
+                        // Check the underlying TCP socket. Node's `ws`
+                        // exposes `readyState=1` for a long time after
+                        // the OS has actually half-closed the socket:
+                        // PING/PONG control frames still flow (the ws
+                        // library handles those at a lower layer than
+                        // send()'s message queue) but application
+                        // message frames stop being delivered. The
+                        // signature is: send queue grows unbounded
+                        // (`ws.bufferedAmount`) while agent-side
+                        // `recv()` shows nothing. Inspect both the
+                        // socket fd and the bufferedAmount to catch
+                        // this before sending the next message.
+                        const sock = targetAgent.ws._socket;
+                        if (!sock || sock.destroyed || !sock.writable || !sock.readable) {
+                            console.log(`[relay] DROPPED ${msg.type}: agent ${client.agentId} socket fd looks dead (destroyed=${sock && sock.destroyed} writable=${sock && sock.writable} readable=${sock && sock.readable})`);
+                            try { ws.send(JSON.stringify({ type: 'agent_offline', reason: 'socket_dead' })); } catch (e) {}
+                            try { targetAgent.ws.terminate(); } catch (e) {}
+                            AGENTS.delete(client.agentId);
+                            return;
+                        }
+                        if (targetAgent.ws.bufferedAmount > 1024 * 1024) {
+                            // >1MB queued. Either the agent is GC-paused
+                            // for a long time, or it stopped calling
+                            // recv(). Either way, the next event will
+                            // never get out in interactive time. Drop
+                            // and force a reconnect.
+                            console.log(`[relay] DROPPED ${msg.type}: agent ${client.agentId} send queue backed up (bufferedAmount=${targetAgent.ws.bufferedAmount} bytes)`);
+                            try { ws.send(JSON.stringify({ type: 'agent_offline', reason: 'send_queue_backed_up' })); } catch (e) {}
+                            try { targetAgent.ws.terminate(); } catch (e) {}
+                            AGENTS.delete(client.agentId);
+                            return;
+                        }
                     }
                     // Per-relay visibility log. The agent is the one that
                     // actually executes these, so server-side we just need
