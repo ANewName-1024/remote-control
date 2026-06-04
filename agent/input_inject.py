@@ -115,6 +115,7 @@ def hotkey(*keys: str):
     if not PYAUTOGUI_AVAILABLE:
         log.warning('no input backend for hotkey')
         return
+    log.info(f'hotkey {"+".join(keys)} via pyautogui')
     try:
         pyautogui.hotkey(*keys)
     except Exception as e:
@@ -126,6 +127,7 @@ def type_text(text: str):
     if not PYAUTOGUI_AVAILABLE:
         log.warning('no input backend for type')
         return
+    log.info(f'type_text len={len(text)} preview="{(text[:30] + "...") if len(text) > 30 else text}"')
     try:
         # interval=0 for speed; pyautogui.write handles unicode reasonably
         pyautogui.write(text, interval=0)

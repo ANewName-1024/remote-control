@@ -166,6 +166,15 @@ def frame_sender(stop_event: threading.Event):
 def handle_cmd_message(msg: dict, screen_size, helper_id: str) -> dict:
     """Process a control message from the service. Return any reply (or None)."""
     t = msg.get('type')
+    # One line per inbound cmd so the operator can see exactly what the
+    # helper is acting on. Use a 'cmd' prefix to keep it distinct from
+    # frame/capture logs.
+    if t and t != ipc.MSG_HEARTBEAT:
+        # Truncate any payload fields that might be large (file data,
+        # big pastes) so a 10MB file upload doesn't drown the log.
+        compact = {k: (v[:80] + '...') if isinstance(v, str) and len(v) > 80 else v
+                   for k, v in msg.items() if k != 'type'}
+        log.info(f'cmd: {t} {compact}')
     try:
         if t == ipc.MSG_HEARTBEAT:
             return {'type': ipc.MSG_HEARTBEAT, 'ts': time.time()}

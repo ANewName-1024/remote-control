@@ -71,6 +71,20 @@ class WSBridge:
         self._stop = threading.Event()
         self._connected = threading.Event()
         self._threads = []
+        # Connection-state string for the service heartbeat.
+        # Values: 'off' | 'connecting' | 'open' | 'auth' | 'authed' | 'closing'
+        self.ws_state: str = 'off'
+        # Auth completion so service heartbeat can include it
+        self.auth_ok: bool = False
+        # Per-message-type counters, surfaced in the 30s service
+        # heartbeat and reset on every print. Resetting per print
+        # gives a real 'events in the last 30s' number, not a
+        # monotonically growing total that loses visibility.
+        self.cmds_sent = 0
+        self._msg_type_stats: dict = {}
+        # Reconnect bookkeeping
+        self._reconnect_attempt: int = 0
+        self._last_connected_at: float = 0.0
         # Stats
         self.frames_sent = 0
         self.cmds_recv = 0
@@ -108,11 +122,19 @@ class WSBridge:
             try:
                 self._connect()
                 backoff = 1.0
+                self._reconnect_attempt = 0
                 # _connect blocks until disconnect
             except Exception as e:
                 self.last_error = repr(e)
-                log.warning(f'WS disconnected: {e}; reconnecting in {backoff:.1f}s')
                 self._connected.clear()
+                self.ws_state = 'off'
+                self.auth_ok = False
+                self._reconnect_attempt += 1
+                # Distinguish 'first connect' from 'reconnect N'
+                if self._reconnect_attempt == 1:
+                    log.warning(f'WS disconnected: {e}; reconnecting in {backoff:.1f}s')
+                else:
+                    log.warning(f'WS disconnected (#{self._reconnect_attempt}): {e}; reconnecting in {backoff:.1f}s')
                 if self._stop.wait(timeout=backoff):
                     return
                 backoff = min(backoff * 2, 30.0)
@@ -121,6 +143,11 @@ class WSBridge:
         url = self.ws_url.rstrip('/')
         if not url.endswith('/agent'):
             url = url + '/agent'
+        # Surface the connect attempt even if it never completes.
+        # Otherwise a stuck TLS handshake looks identical to "still
+        # trying the first one" in the heartbeat.
+        self.ws_state = 'connecting'
+        log.info(f'WS connecting to {url} as {self.agent_id} (attempt #{self._reconnect_attempt + 1})')
         if HAVE_WSCLIENT:
             self._ws = websocket.WebSocket()
             self._ws.connect(url, timeout=10)
@@ -135,8 +162,11 @@ class WSBridge:
         else:
             self._ws = _StdlibWSClient(url)
             self._ws.connect()
+        self.ws_state = 'open'
+        self._last_connected_at = time.time()
         log.info(f'WS connected: {url}')
         # Send auth
+        self.ws_state = 'auth'
         self._send({
             'type': 'auth',
             'agentId': self.agent_id,
@@ -155,6 +185,12 @@ class WSBridge:
                 if not raw:
                     raise ConnectionError('server closed')
                 msg = json.loads(raw)
+                # Switch to 'authed' as soon as we see auth_ok from server.
+                # This is the moment remote clients can actually use us.
+                if msg.get('type') == 'auth_ok' and not self.auth_ok:
+                    self.auth_ok = True
+                    self.ws_state = 'authed'
+                    log.info(f'WS auth_ok: agent_id={msg.get("agentId")} ready for remote clients')
                 self._on_server_msg(msg)
             except WebSocketTimeoutException:
                 # No business message in 1h - that's fine, server is alive
@@ -177,6 +213,10 @@ class WSBridge:
         whether the server normalizes the wire format.
         """
         t = msg.get('type')
+        # Per-msg-type counter for the 30s heartbeat. Cheap dict incr.
+        # Pings excluded so the heartbeat doesn't just show "10 pings".
+        if t and t != 'ping':
+            self._msg_type_stats[t] = self._msg_type_stats.get(t, 0) + 1
         if t in ('auth_ok', 'auth_failed', 'agent_offline', 'error', 'client_connected', 'client_disconnected'):
             log.info(f'WS: {t}: {msg}')
             return
@@ -262,6 +302,15 @@ class WSBridge:
                     log.debug(f'heartbeat send failed: {e}')
             if self._stop.wait(timeout=10):
                 return
+
+    def get_and_reset_msg_stats(self) -> dict:
+        """Snapshot the per-msg-type counter and zero it. Called by the
+        service heartbeat thread every 30s so the operator can see
+        'mouse:5 key:2 exec:1' in the last 30s window, not a lifetime
+        total that loses the 'is anything happening?' signal quickly."""
+        out = self._msg_type_stats
+        self._msg_type_stats = {}
+        return out
 
     def _send(self, msg: dict) -> None:
         data = json.dumps(msg, ensure_ascii=False)

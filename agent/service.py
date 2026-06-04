@@ -509,11 +509,36 @@ def run(config_dir: str = None):
     # Accept both AGENT_SECRET (preferred) and ACCESS_PASSWORD
     # (legacy alias still used by the install script).
     secret = os.environ.get('AGENT_SECRET') or os.environ.get('ACCESS_PASSWORD') or ''
+
+    # Startup banner: log full effective configuration in one place
+    # so postmortem troubleshooting doesn't have to grep 4 files.
+    # Must be AFTER the agent_id / secret / ws_url reads so the
+    # interpolations resolve (prior version of this block ran first
+    # and crashed with UnboundLocalError -- see git log for the
+    # 'agent_id' in startup banner bug).
+    _wgc = None
+    try:
+        from . import wgc as _wgc
+    except Exception:
+        pass
+    wgc_avail = bool(_wgc and getattr(_wgc, 'WGC_AVAILABLE', False))
+    log.info('=' * 60)
+    log.info('RemoteControl Agent starting')
+    log.info(f'  agent_id:    {agent_id}')
+    log.info(f'  computer:    {os.environ.get("COMPUTERNAME", "?")} session={os.environ.get("SESSIONNAME", "?")}')
+    log.info(f'  ws_url:      {ws_url or "(disabled)"}')
+    log.info(f'  secret:      {"configured (len=" + str(len(secret)) + ")" if secret else "(MISSING)"}')
+    log.info(f'  capture:     mss=ok wgc={wgc_avail}')
+    log.info(f'  pipes:       cmd={ipc.CMD_PIPE} frame={ipc.FRAME_PIPE}')
+    log.info(f'  python:      {sys.version.split()[0]}')
+    log.info('=' * 60)
+
     if ws_url and secret:
         from . import ws_bridge as _wsb
         bridge = _wsb.WSBridge(pipes, ws_url, agent_id, secret)
         bridge.start()
         log.info(f'WS bridge starting for {agent_id} -> {ws_url}')
+        log.info('WS bridge threads: ws_reader + frame_pump + retry_loop')
     else:
         log.warning('WS_URL or AGENT_SECRET not set; bridge disabled (helper will still capture, but no remote client)')
 
@@ -526,10 +551,17 @@ def run(config_dir: str = None):
             now = time.time()
             if now - last_log >= 30:
                 bc = ', '.join(f'{t.name}={t.is_alive()}' for t in pipes.threads)
-                bridge_stats = (
-                    f' frames_sent={bridge.frames_sent} bytes_sent={bridge.bytes_sent}'
-                    if bridge else ' bridge=off'
-                )
+                if bridge:
+                    msg_stats = bridge.get_and_reset_msg_stats()
+                    msg_str = ' '.join(f'{k}={v}' for k, v in sorted(msg_stats.items())) or 'none'
+                    bridge_stats = (
+                        f' frames_sent={bridge.frames_sent} bytes_sent={bridge.bytes_sent}'
+                        f' ws={bridge.ws_state} cmds_sent={bridge.cmds_sent} cmds_recv={bridge.cmds_recv}'
+                        f' auth={"yes" if bridge.auth_ok else "no"}'
+                        f' last30s=[{msg_str}]'
+                    )
+                else:
+                    bridge_stats = ' bridge=off'
                 log.info(f'service heartbeat: {bc}{bridge_stats}')
                 last_log = now
             time.sleep(0.5)

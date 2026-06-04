@@ -75,7 +75,12 @@ class ScreenCapture:
                 log.info(f'capture: WGC UWP backend ({self.width}x{self.height})')
                 return
             except Exception as e:
-                log.debug(f'WGC init failed: {e}')
+                # Surface fallback reason at INFO so the operator can
+                # see why a more capable backend wasn't usable. This
+                # matters in headless / RDP / locked-session scenarios
+                # where the same code picks a different backend each
+                # time and the old log.debug hid the cause.
+                log.info(f'capture: WGC init failed, falling back: {e}')
 
         if DXCAM_AVAILABLE:
             try:
@@ -89,7 +94,7 @@ class ScreenCapture:
                     log.info(f'capture: DXGI backend ({self.width}x{self.height})')
                     return
             except Exception as e:
-                log.debug(f'dxcam init failed: {e}')
+                log.info(f'capture: dxcam init failed, falling back: {e}')
 
         if MSS_AVAILABLE:
             try:
@@ -101,7 +106,7 @@ class ScreenCapture:
                 log.info(f'capture: mss backend ({self.width}x{self.height})')
                 return
             except Exception as e:
-                log.debug(f'mss init failed: {e}')
+                log.info(f'capture: mss init failed, falling back: {e}')
 
         if PIL_AVAILABLE:
             try:

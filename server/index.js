@@ -24,9 +24,15 @@ const PORT = process.env.PORT || 21112;
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'Ops@2024!';  // 默认密码，可通过环境变量修改
 const AGENTS = new Map();   // agentId -> { ws, info, lastSeen }
-const CLIENTS = new Map();   // clientId -> { ws, agentId, info }
+const CLIENTS = new Map();  // clientId -> { ws, agentId, info }
 const SESSIONS = new Map();  // sessionId -> { agentId, clientId, type, data }
 const PASSWORD_TOKENS = new Map();  // passwordToken -> true (one-time or timed)
+
+// Process-wide relay stats. Per-socket state is per-ws, but the
+// 30s health snapshot needs cumulative counters and active counts.
+// We count 'recv' on every message parse, 'fwd' on every successful
+// relay. PONGs are NOT counted (they'd dwarf everything).
+const STATS = { totalRecv: 0, totalFwd: 0 };
 
 // Ensure upload dir exists
 if (!fs.existsSync(UPLOAD_DIR)) {
@@ -359,7 +365,7 @@ wss.on('connection', (ws, req) => {
     // Skip non-websocket paths
     if (path !== '/agent' && path !== '/client') return;
     
-    console.log(`[WS] New connection: ${path} from ${req.socket.remoteAddress}`);
+    console.log(`[WS] New connection: ${path} from ${req.socket.remoteAddress} ua="${(req.headers['user-agent'] || '').slice(0, 80)}"`);
     
     let authenticated = false;
     let agentId = null;
@@ -383,11 +389,14 @@ wss.on('connection', (ws, req) => {
                     AGENTS.set(agentId, {
                         ws,
                         info: { agentId: aid, hostname, os, secret },
-                        lastSeen: Date.now()
+                        lastSeen: Date.now(),
+                        connectedAt: Date.now(),
+                        remoteIp: req.socket.remoteAddress,
+                        userAgent: req.headers['user-agent'] || ''
                     });
                     
                     ws.send(JSON.stringify({ type: 'auth_ok', agentId: aid }));
-                    console.log(`[Agent] Registered: ${aid} (${hostname})`);
+                    console.log(`[Agent] Registered: ${aid} (${hostname} ${os}) from ${req.socket.remoteAddress}`);
                     return;
                 }
                 
@@ -539,7 +548,9 @@ wss.on('connection', (ws, req) => {
                         }
                     }));
                     
-                    console.log(`[Client] ${clientId} authenticated for agent ${targetAgentId}`);
+                    console.log(`[Client] ${clientId} authenticated for agent ${targetAgentId} (hostname=${targetAgent.info.hostname} os=${targetAgent.info.os})`);
+                    // Also report the underlying ip for client -> agent debugging
+                    console.log(`[Client]   client_ip=${req.socket.remoteAddress} agent_online=true frame_buffered=${targetAgent._buffered ? 'yes' : 'no'}`);
                     return;
                 }
                 
@@ -557,6 +568,7 @@ wss.on('connection', (ws, req) => {
                 // the agent can immediately push a fresh kf instead of
                 // waiting for its 3-second keyframe interval.
                 if (['mouse', 'key', 'exec', 'file_request', 'clipboard', 'req_kf', 'subscribe', 'ping'].includes(msg.type)) {
+                    STATS.totalRecv += 1;
                     const targetAgent = AGENTS.get(client.agentId);
                     // Per-relay visibility log. The agent is the one that
                     // actually executes these, so server-side we just need
@@ -568,8 +580,21 @@ wss.on('connection', (ws, req) => {
                         console.log(`[relay] mouse ${msg.action} (${msg.x},${msg.y}) ${msg.button} -> agent ${client.agentId}`);
                     } else if (msg.type === 'key') {
                         console.log(`[relay] key ${msg.action} '${msg.key}' -> agent ${client.agentId}`);
+                    } else if (msg.type === 'exec') {
+                        // Truncate command for log readability
+                        const cmd = (msg.command || '').toString();
+                        const cmdTrunc = cmd.length > 60 ? cmd.slice(0, 60) + '...' : cmd;
+                        console.log(`[relay] exec '${cmdTrunc}' (cwd=${msg.cwd || '-'}) -> agent ${client.agentId}`);
+                    } else if (msg.type === 'file_request') {
+                        console.log(`[relay] file_request op=${msg.op || msg.action || '?'} path='${msg.path || msg.target || '?'}' -> agent ${client.agentId}`);
+                    } else if (msg.type === 'clipboard') {
+                        const text = (msg.text || '').toString();
+                        const txtTrunc = text.length > 60 ? text.slice(0, 60) + '...' : text;
+                        console.log(`[relay] clipboard ${msg.action || 'set'} '${txtTrunc}' -> agent ${client.agentId}`);
                     } else if (msg.type === 'req_kf' || msg.type === 'subscribe') {
                         console.log(`[relay] ${msg.type} -> agent ${client.agentId}`);
+                    } else if (msg.type === 'ping') {
+                        // No log per ping -- 10s heartbeats would flood.
                     }
                     if (targetAgent && targetAgent.ws.readyState === 1) {
                         // Create session for commands that need a server-side session
@@ -578,6 +603,7 @@ wss.on('connection', (ws, req) => {
                         // - file_request: reuse client-provided sessionId (file_request → file_chunk)
                         //   The client (index.html doDownload) already generates
                         //   'dl_' + Date.now() as the session id, so we can keep it.
+                        STATS.totalFwd += 1;
                         if (msg.type === 'exec' && msg.cmd) {
                             const sessionId = uuidv4();
                             SESSIONS.set(sessionId, { agentId: client.agentId, clientId, type: 'exec' });
@@ -606,13 +632,18 @@ wss.on('connection', (ws, req) => {
         }
     });
     
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
+        const reasonStr = reason ? reason.toString().slice(0, 80) : '';
         if (agentId) {
-            console.log(`[Agent] Disconnected: ${agentId}`);
+            const entry = AGENTS.get(agentId);
+            const uptime = entry && entry.connectedAt ? ((Date.now() - entry.connectedAt) / 1000).toFixed(0) : '?';
+            console.log(`[Agent] Disconnected: ${agentId} (uptime=${uptime}s code=${code} reason="${reasonStr}")`);
             AGENTS.delete(agentId);
         }
         if (clientId) {
-            console.log(`[Client] Disconnected: ${clientId}`);
+            const entry = CLIENTS.get(clientId);
+            const dur = entry && entry.connectedAt ? ((Date.now() - entry.connectedAt) / 1000).toFixed(0) : '?';
+            console.log(`[Client] Disconnected: ${clientId} (dur=${dur}s code=${code} reason="${reasonStr}")`);
             CLIENTS.delete(clientId);
         }
     });
@@ -627,6 +658,7 @@ wss.on('connection', (ws, req) => {
 // ============================================================
 
 server.listen(PORT, () => {
+    const startTime = new Date().toISOString();
     console.log(`
 ╔══════════════════════════════════════════════════════╗
 ║       Remote Control Relay Server v1.0              ║
@@ -635,8 +667,19 @@ server.listen(PORT, () => {
 ║  Web Interface:      http://localhost:${PORT}          ║
 ║  Agent Endpoint:     ws://host:${PORT}/agent            ║
 ║  Client Endpoint:    ws://host:${PORT}/client           ║
+║  Started:            ${startTime}      ║
+║  Node:               ${process.version}                  ║
+║  PID:                ${process.pid}                       ║
 ╚══════════════════════════════════════════════════════╝
     `);
+    // Aggregate stats every 30s. Mirrors the agent's heartbeat but
+    // for the relay itself: total messages, unique agents/clients,
+    // peak ws count, dropped/forwards.
+    let lastStats = { up: 0, recv: 0, fwd: 0, drop: 0 };
+    setInterval(() => {
+        const ws = global.wss ? global.wss.clients.size : 0;
+        console.log(`[Stats] uptime=${process.uptime().toFixed(0)}s agents=${AGENTS.size} clients=${CLIENTS.size} ws_open=${ws} total_recv=${STATS.totalRecv} total_fwd=${STATS.totalFwd}`);
+    }, 30000);
 });
 
 // Graceful shutdown
