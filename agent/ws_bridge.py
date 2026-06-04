@@ -184,13 +184,15 @@ class WSBridge:
             # mouse event from remote client (action: down/up/move/click/double_click/wheel)
             self.cmds_recv += 1
             try:
-                self.pipes.send_cmd({
+                cmd = {
                     'type': ipc.MSG_INPUT_MOUSE,
                     'x': msg.get('x'),
                     'y': msg.get('y'),
                     'button': msg.get('button', 'left'),
                     'action': msg.get('action', 'move'),
-                })
+                }
+                self.pipes.send_cmd(cmd)
+                log.info(f'WS->helper mouse {cmd["action"]} ({cmd["x"]},{cmd["y"]}) {cmd["button"]}')
             except Exception as e:
                 log.warning(f'WS->helper mouse forward failed: {e}')
             return
@@ -198,11 +200,13 @@ class WSBridge:
             # keyboard event from remote client (action: down/up/press)
             self.cmds_recv += 1
             try:
-                self.pipes.send_cmd({
+                cmd = {
                     'type': ipc.MSG_INPUT_KEY,
                     'key': msg.get('key', ''),
                     'action': msg.get('action', 'press'),
-                })
+                }
+                self.pipes.send_cmd(cmd)
+                log.info(f'WS->helper key {cmd["action"]} "{cmd["key"]}"')
             except Exception as e:
                 log.warning(f'WS->helper key forward failed: {e}')
             return

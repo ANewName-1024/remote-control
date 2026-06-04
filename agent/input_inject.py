@@ -88,6 +88,7 @@ def key(key: str, action: str):
     if not PYAUTOGUI_AVAILABLE and not WIN32_AVAILABLE:
         log.warning('no input backend available')
         return
+    log.info(f'key {action} "{key}" via {"pyautogui" if PYAUTOGUI_AVAILABLE else "ctypes"}')
     try:
         if PYAUTOGUI_AVAILABLE:
             if action in ('press', 'down'):

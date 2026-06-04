@@ -40,8 +40,12 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 const app = express();
 const server = http.createServer(app);
 
-// Serve static files (web control interface)
-app.use(express.static(path.join(__dirname, 'static')));
+// Serve static files (web control interface) — disable cache for hot dev
+app.use(express.static(path.join(__dirname, 'static'), {
+    etag: false,
+    lastModified: false,
+    setHeaders: (res) => res.setHeader('Cache-Control', 'no-store, must-revalidate'),
+}));
 
 // === Static Deploy API ===
 const DEPLOY_DIR = path.join(__dirname, 'static', 'app');
@@ -549,8 +553,24 @@ wss.on('connection', (ws, req) => {
                 if (client) client.lastSeen = Date.now();
                 
                 // Forward commands to agent
-                if (['mouse', 'key', 'exec', 'file_request', 'clipboard'].includes(msg.type)) {
+                // Also forward 'req_kf' (keyframe request from client) so
+                // the agent can immediately push a fresh kf instead of
+                // waiting for its 3-second keyframe interval.
+                if (['mouse', 'key', 'exec', 'file_request', 'clipboard', 'req_kf', 'subscribe', 'ping'].includes(msg.type)) {
                     const targetAgent = AGENTS.get(client.agentId);
+                    // Per-relay visibility log. The agent is the one that
+                    // actually executes these, so server-side we just need
+                    // to confirm we received it from the client and
+                    // forwarded it. Helps diagnose "input goes nowhere"
+                    // cases where the client sends something but it gets
+                    // dropped before reaching the helper.
+                    if (msg.type === 'mouse') {
+                        console.log(`[relay] mouse ${msg.action} (${msg.x},${msg.y}) ${msg.button} -> agent ${client.agentId}`);
+                    } else if (msg.type === 'key') {
+                        console.log(`[relay] key ${msg.action} '${msg.key}' -> agent ${client.agentId}`);
+                    } else if (msg.type === 'req_kf' || msg.type === 'subscribe') {
+                        console.log(`[relay] ${msg.type} -> agent ${client.agentId}`);
+                    }
                     if (targetAgent && targetAgent.ws.readyState === 1) {
                         // Create session for commands that need a server-side session
                         // so the agent's subsequent file_chunk/output can be routed back.
