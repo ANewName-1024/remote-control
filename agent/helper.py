@@ -238,16 +238,13 @@ def frame_sender(stop_event: threading.Event):
                 # Convert numpy RGB to PIL Image for DeltaScreenCapture.
                 from PIL import Image
                 img = Image.fromarray(arr)
-                # Overlay any live click markers so the user can see
-                # exactly where the App's click landed on the desktop.
-                # Markers are recorded by _record_click() from
-                # cmd_loop's input_mouse handler. Drawn here on the
-                # raw frame BEFORE DeltaScreenCapture splits it into
-                # kf/df regions, so the marker survives the delta
-                # encoding (it just becomes part of the changed
-                # pixels and the server pushes a df update).
-                _draw_markers(img)
-                msg = delta.capture_and_encode()
+                # Note: sc.grab() above is the LEGACY standalone
+                # capture, but delta.capture_and_encode() does its
+                # own internal _grab() and ignores the img we built
+                # here. We pass _draw_markers as the on_grab
+                # callback so the click markers are drawn on the
+                # frame delta actually encodes + ships to the App.
+                msg = delta.capture_and_encode(on_grab=_draw_markers)
                 if msg is None:
                     skip_count += 1
                 else:

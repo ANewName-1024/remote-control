@@ -10,7 +10,7 @@ import time
 import struct
 import logging
 import threading
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Callable
 
 try:
     from PIL import Image
@@ -58,10 +58,24 @@ class DeltaScreenCapture:
         
         logging.info(f"DeltaScreenCapture: {width}x{height}, blocks={self.bw}x{self.bh}")
     
-    def capture_and_encode(self) -> Optional[Dict[str, Any]]:
-        """Capture screen and encode as keyframe or delta."""
+    def capture_and_encode(self, on_grab: Optional[Callable[[Image.Image], None]] = None) -> Optional[Dict[str, Any]]:
+        """Capture screen and encode as keyframe or delta.
+
+        `on_grab(img)`: optional callback invoked with the freshly
+        grabbed PIL Image BEFORE we convert it to bytes for hashing
+        and BEFORE we encode the kf / df regions. Used by the helper
+        to overlay click markers (visible visual feedback on the
+        captured screen) -- the marker pixels then get included in
+        the rgb bytes, the changed-block detection picks them up,
+        and the next df pushes the marker region to the App.
+        """
         try:
             img = self._grab()
+            if on_grab is not None:
+                try:
+                    on_grab(img)
+                except Exception as e:
+                    logging.debug(f'on_grab callback failed: {e}')
             w, h = img.size
             rgb = img.convert('RGB').tobytes('raw', 'RGB')
         except Exception as e:
