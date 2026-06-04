@@ -50,9 +50,14 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-# Enhanced screen capture with delta frames
+# Enhanced screen capture with delta frames.
+# Use absolute `agent.enhanced_screen` import (not the bare top-level
+# name) so it resolves from any cwd -- previously the bare import only
+# worked when the script ran with cwd=agent/, and the import-error log
+# spam ("enhanced_screen module not found") drowned the actual error
+# when the service subprocess was launched from %APPDATA%.
 try:
-    from enhanced_screen import DeltaScreenCapture, get_screen_size
+    from agent.enhanced_screen import DeltaScreenCapture, get_screen_size
 except ImportError:
     DeltaScreenCapture = None
     logging.warning("enhanced_screen module not found")

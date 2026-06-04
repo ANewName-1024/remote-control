@@ -29,9 +29,15 @@ log = logging.getLogger('ws-bridge')
 # implementation if unavailable.
 try:
     import websocket  # type: ignore
+    from websocket import WebSocketTimeoutException  # type: ignore
     HAVE_WSCLIENT = True
 except ImportError:
     HAVE_WSCLIENT = False
+    # Fallback for the stdlib-only path: define a sentinel exception so
+    # the recv loop's `except WebSocketTimeoutException: continue` keeps
+    # the call site tidy even if websocket-client is missing.
+    class WebSocketTimeoutException(Exception):  # type: ignore[no-redef]
+        pass
 
 
 class WSBridge:
@@ -116,7 +122,14 @@ class WSBridge:
         if HAVE_WSCLIENT:
             self._ws = websocket.WebSocket()
             self._ws.connect(url, timeout=10)
-            self._ws.settimeout(30)
+            # Long recv timeout: we don't expect a steady stream of business
+            # messages from the server (it only pushes input events on demand).
+            # A short timeout here used to cause spurious "Connection timed out"
+            # disconnects when the user just sits idle. The server sends WS
+            # protocol pings every 25s (see server/index.js heartbeat) and
+            # websocket-client handles those internally without surfacing them
+            # to recv(), so blocking for a long time is safe.
+            self._ws.settimeout(3600)
         else:
             self._ws = _StdlibWSClient(url)
             self._ws.connect()
@@ -130,7 +143,10 @@ class WSBridge:
             'os': self.os_info,
         })
         self._connected.set()
-        # Loop: read messages from server, dispatch to helper
+        # Loop: read messages from server, dispatch to helper.
+        # We swallow WebSocketTimeoutException (idle timeout) and keep waiting,
+        # so an idle user doesn't cause a reconnect storm. Anything else
+        # (socket closed, protocol error) still bubbles up to reconnect.
         while not self._stop.is_set():
             try:
                 raw = self._ws.recv()
@@ -138,6 +154,10 @@ class WSBridge:
                     raise ConnectionError('server closed')
                 msg = json.loads(raw)
                 self._on_server_msg(msg)
+            except WebSocketTimeoutException:
+                # No business message in 1h - that's fine, server is alive
+                # (heartbeat pings keep the TCP/WS connection warm).
+                continue
             except Exception as e:
                 log.warning(f'WS recv error: {e}')
                 raise
