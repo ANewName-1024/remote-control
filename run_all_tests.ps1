@@ -49,6 +49,7 @@ Write-Host "  Python Test Suites" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 $python = (Get-Command python -ErrorAction SilentlyContinue)
+$optInSmoke = $env:RC_RUN_E2E -eq '1'
 if ($python) {
     # Run from the project root (NOT the agent/ subdir) so that
     # 'agent' resolves to the agent/ PACKAGE (with its _PackageModule
@@ -72,6 +73,45 @@ if ($python) {
     Write-Host "Python not found, skipping Python tests" -ForegroundColor DarkYellow
     $results += [PSCustomObject]@{
         Name = 'Python tests (skipped: python not in PATH)'
+        ExitCode = 0
+    }
+}
+
+# 3. Real-Windows mouse smoke test (opt-in: RC_RUN_E2E=1)
+# Verifies pyautogui / ctypes actually move the OS cursor, which
+# the unit tests cannot do (they mock pyautogui). Off by default
+# because it WILL click on whatever is under the cursor and shift
+# the cursor position during the test.
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Real-Windows Smoke Test (opt-in)" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+
+if ($optInSmoke) {
+    if ($python) {
+        Write-Host ""
+        Write-Host ">>> Running: agent/smoke_test_mouse.py (RC_RUN_E2E=1)" -ForegroundColor Yellow
+        $p = Start-Process -FilePath 'python' -ArgumentList @('-m', 'agent.smoke_test_mouse') -NoNewWindow -Wait -PassThru -WorkingDirectory $ScriptDir
+        $results += [PSCustomObject]@{
+            Name = 'Real-Windows mouse smoke (5 sub-tests, moves cursor)'
+            ExitCode = $p.ExitCode
+        }
+        if ($p.ExitCode -ne 0) {
+            Write-Host "<<< FAILED: real-Windows mouse smoke (exit $p.ExitCode)" -ForegroundColor Red
+        } else {
+            Write-Host "<<< PASSED: real-Windows mouse smoke" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "Python not found, cannot run smoke test" -ForegroundColor DarkYellow
+        $results += [PSCustomObject]@{
+            Name = 'Real-Windows mouse smoke (skipped: python not in PATH)'
+            ExitCode = 0
+        }
+    }
+} else {
+    Write-Host "Skipped (set RC_RUN_E2E=1 to run; will move cursor and click on screen)" -ForegroundColor DarkYellow
+    $results += [PSCustomObject]@{
+        Name = 'Real-Windows mouse smoke (skipped: RC_RUN_E2E != 1)'
         ExitCode = 0
     }
 }

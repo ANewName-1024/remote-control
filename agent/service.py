@@ -39,11 +39,18 @@ if _PARENT not in sys.path:
 
 from agent import protocol as ipc
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [service %(levelname)s] %(message)s',
+# Use the shared rotating file logger so service.log persists
+# across service restarts and doesn't fill the disk. The old
+# `logging.basicConfig` only went to stderr, which is fine for
+# nssm-captured runs but useless when the operator is trying to
+# debug a startup failure (stderr is lost the moment nssm
+# restarts the service).
+from agent.log_rotation import setup_rotating_log
+SERVICE_LOG = os.path.join(
+    os.environ.get('APPDATA', '.'), 'RemoteControlAgent',
+    'logs', 'service.log',
 )
-log = logging.getLogger('service')
+log = setup_rotating_log('service', SERVICE_LOG, level=logging.INFO)
 
 # Auth token: passed to helper via env var. Prevents random local
 # processes from injecting commands into the named pipe.

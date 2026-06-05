@@ -139,6 +139,45 @@
 
 ### H. App 诊断日志主动上传（Flutter App → server → `DIAG_DIR`）
 
+### V. Agent 鼠标注入静默失败防护（`agent/input_inject.py:verify_at` + 真机 smoke）
+
+SendInput 在 Session 0 / UAC / 锁屏场景下**静默 no-op**：pyautogui.moveTo() 返回成功，但 `pyautogui.position()` 后还是旧坐标。单元测试会拄着 mock 看不到这个 bug，需要在真机上调用 verify_at() 验位置才知道是否真生效。
+
+| ID | 功能点 | 测试 | 类型 | 优先级 |
+|----|--------|------|------|--------|
+| V1 | verify_at 坐标完全匹配返回 True | `verify_at` V1 | U | P0 |
+| V2 | verify_at 1px 误差内仍 True | `verify_at` V2 | U | P0 |
+| V3 | verify_at 误差超 tolerance 返回 False | `verify_at` V3 | U | P0 |
+| V4 | verify_at 不匹配 log warning | `verify_at` V4 | U | P0 |
+| V5 | pyautogui.position 报异常时 verify_at 返回 False 不崩溃 | `verify_at` V5 | U | P1 |
+| V6 | 无 pyautogui 时 verify_at 跳过验证 | `verify_at` V6 | U | P1 |
+| V7 | mouse('move') 后调用 verify_at(x, y) | `verify_at` V7 | U | P0 |
+| V8 | mouse('click') 不调 verify_at | `verify_at` V8 | U | P0 |
+| V9 | mouse('down') 不调 verify_at | `verify_at` V9 | U | P0 |
+| V10 | mouse('up') 不调 verify_at | `verify_at` V10 | U | P0 |
+| V11 | mouse('wheel') 不调 verify_at | `verify_at` V11 | U | P0 |
+| V12 | 真机: move + position 坐标对得上 | `smoke_test_mouse.py` Test 1 | E2E | P0 |
+| V13 | 真机: 二次 move 仍能到目标 | `smoke_test_mouse.py` Test 2 | E2E | P1 |
+| V14 | 真机: click 不抬 cursor | `smoke_test_mouse.py` Test 3 | E2E | P1 |
+| V15 | 真机: dragTo 结尾坐标 = 目标 | `smoke_test_mouse.py` Test 4 | E2E | P1 |
+| V16 | 真机: verify_at 在真机上能识别 mismatch | `smoke_test_mouse.py` Test 5 | E2E | P0 |
+
+V12-V16 需要真机跑：设 `RC_RUN_E2E=1` 后 `run_all_tests.ps1` 才会执行。默认跳过 (会在屏幕上点)。
+
+### R. Agent 日志轮转（`agent/log_rotation.py` + 集成到 3 个脚本）
+
+| ID | 功能点 | 测试 | 类型 | 优先级 |
+|----|--------|------|------|--------|
+| R1 | 首次写日志创建文件 | `log_rotation` R1 | U | P0 |
+| R2 | 超 max_bytes 轮转 | `log_rotation` R2 | U | P0 |
+| R3 | backup_count 严格限制总数 | `log_rotation` R3 | U | P0 |
+| R4 | 同名 logger 重复调用幂等 | `log_rotation` R4 | U | P0 |
+| R5 | 父目录不存在自动建 | `log_rotation` R5 | U | P0 |
+| R6 | utf-8 中文日志不损 | `log_rotation` R6 | U | P0 |
+| R7 | logger.propagate=False 避免 double-log | `log_rotation` R7 | U | P0 |
+| R8 | max_bytes=1 极限场景不崩 | `log_rotation` R8 | U | P1 |
+| R9 | 2 个 handler (file + stderr) 格式不冲突 | `log_rotation` R9 | U | P0 |
+
 | ID | 功能点 | 端点 | 测试 | 类型 | 优先级 |
 |----|--------|------|------|------|--------|
 | H1 | Client 发 `app_diag` 落盘 + ack | `WS /client` | `diag` T01 (D1) | I | P0 |
@@ -268,6 +307,8 @@ cd D:\.openclaw\workspace\projects\devtools\remote-control
 - ✅ Web Client：通过 server 端验证 100% 关键行为（F1-F7）
 - ✅ 安全加固：100% 关键项（G1-G7）
 - ✅ App 诊断日志主动上传：100% 端点 + 拦截面（H1-H12，含 36 个独立断言）
+- ✅ Agent 鼠标注入静默失败防护：100% 路径（V1-V11，11 个独立断言 + 5 个真机 sub-test）
+- ✅ Agent 日志轮转：100% 边缘情况（R1-R9，9 个独立断言）
 
 **未覆盖**（手动 / E2E 真机验证）：
 - Web Client 的 UI 渲染、canvas 绘制

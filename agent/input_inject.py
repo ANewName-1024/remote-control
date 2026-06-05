@@ -32,6 +32,52 @@ def clamp_to_screen(x: int, y: int, w: int, h: int) -> Tuple[int, int]:
     return x, y
 
 
+def verify_at(x: int, y: int, tolerance: int = 2) -> bool:
+    """Check that the OS cursor is actually at (x, y) right now.
+
+    Why this matters
+    ----------------
+    SendInput (the underlying pyautogui / ctypes path) silently
+    no-ops in three failure modes that look identical from the
+    caller's perspective:
+      1. Helper is running in Session 0 (SYSTEM) instead of the
+         user's active session.
+      2. UAC is blocking the call (different integrity level).
+      3. The display is locked or no input desktop is attached.
+
+    In all three, pyautogui.moveTo() returns successfully but
+    `pyautogui.position()` afterwards still shows the old
+    coordinates. Without a verify, the user sees "sendMouse: 100+"
+    in the App log, "ws loop 481" on the server, and "last30s:
+    cmds_recv=0" on the agent — the only signal being cursor
+    doesn't move.
+
+    Tolerance is in pixels (default 2) because of sub-pixel
+    rounding in the SendInput normalized -> pixel conversion.
+
+    Returns True if cursor is at (x, y) within tolerance, False
+    otherwise. Logs a warning on mismatch with the actual vs
+    expected position so silent failures are visible in the log.
+    """
+    if not PYAUTOGUI_AVAILABLE:
+        # No way to read cursor without pyautogui / pywin32.
+        # The test mocks pyautogui anyway, so this only matters
+        # in production where pyautogui is the primary path.
+        return True
+    try:
+        actual_x, actual_y = pyautogui.position()
+    except Exception as e:
+        log.warning(f'verify_at: cannot read cursor position: {e}')
+        return False
+    if abs(actual_x - x) > tolerance or abs(actual_y - y) > tolerance:
+        log.warning(
+            f'verify_at MISMATCH: expected=({x},{y}) actual=({actual_x},{actual_y}) '
+            f'(tolerance={tolerance}). Likely Session 0 / UAC / display lock.'
+        )
+        return False
+    return True
+
+
 def mouse(x: int, y: int, button: str, action: str, screen_size: Tuple[int, int]):
     """Inject a mouse event. screen_size = (w, h) of primary display."""
     if not PYAUTOGUI_AVAILABLE and not WIN32_AVAILABLE:
@@ -79,6 +125,21 @@ def mouse(x: int, y: int, button: str, action: str, screen_size: Tuple[int, int]
                 ctypes.windll.user32.mouse_event(down_flag, nx, ny, 0, 0)
             if action in ('up', 'click', 'double_click', 'dblclick'):
                 ctypes.windll.user32.mouse_event(up_flag, nx, ny, 0, 0)
+        # After-action observability: log what we did, and for 'move'
+        # also call verify_at() so a silent SendInput failure shows
+        # up as a 'verify_at MISMATCH' warning instead of going
+        # unnoticed. We only verify on 'move' (not click / down /
+        # up) because a click without a preceding move still lands
+        # at the cursor's current position, so verify-after-click
+        # is meaningless (we don't know what the click position
+        # should be).
+        if action == 'move':
+            verify_at(x, y)
+        else:
+            log.info(
+                f'mouse {action} ({x},{y}) {btn} via '
+                f'{"pyautogui" if PYAUTOGUI_AVAILABLE else "ctypes"}'
+            )
     except Exception as e:
         log.warning(f'mouse error: {e}')
 

@@ -113,23 +113,21 @@ if not os.path.exists(ICON_PATH):
 
 def setup_logging():
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    # Use simple file handler that flushes immediately
-    fh = logging.FileHandler(LOG_FILE, encoding='utf-8', mode='a')
-    fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
-    fh.setLevel(logging.INFO)
-    # Console handler (suppressed in windowed mode)
-    if IS_WINDOWED:
-        try:
-            ch = logging.StreamHandler(sys.stdout)
-        except Exception:
-            ch = logging.StreamHandler(open(os.devnull, 'w'))
-    else:
-        ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.addHandler(fh)
-    root.addHandler(ch)
+    # Use the shared rotating file handler so agent.log doesn't
+    # grow without bound (it used to be a plain FileHandler — see
+    # agent/log_rotation.py for the rotation policy). 5MB x 3
+    # backups = 20MB max on disk, same as the service / helper logs.
+    from agent.log_rotation import setup_rotating_log
+    # Configure both the named logger AND the root so the bare
+    # `logging.info(...)` calls scattered through this file
+    # (handle_mouse, handle_key, handle_file_*, etc.) also land in
+    # the rotated file. Previously these relied on a root-level
+    # FileHandler we set up here; now we get rotation for free.
+    setup_rotating_log('agent', LOG_FILE, level=logging.INFO)
+    _file_handler = logging.getLogger('agent').handlers[0]
+    _root = logging.getLogger()
+    _root.setLevel(logging.INFO)
+    _root.addHandler(_file_handler)
 
 IS_WINDOWED = sys.executable.endswith('pythonw.exe') or '--windowed' in sys.argv
 

@@ -35,11 +35,18 @@ from agent import capture as cap
 from agent import input_inject as inp
 from agent.enhanced_screen import DeltaScreenCapture
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [helper %(levelname)s] %(message)s',
+# Use the shared rotating file logger (see agent/log_rotation.py).
+# Helper logs are the most useful for debugging the App -> desktop
+# chain (handle_msg, inp.mouse calls, click markers) but they're
+# otherwise trapped inside the user session with no easy way to
+# pull them out. The new file path mirrors the service one:
+# %APPDATA%\RemoteControlAgent\logs\helper.log
+from agent.log_rotation import setup_rotating_log
+HELPER_LOG = os.path.join(
+    os.environ.get('APPDATA', '.'), 'RemoteControlAgent',
+    'logs', 'helper.log',
 )
-log = logging.getLogger('helper')
+log = setup_rotating_log('helper', HELPER_LOG, level=logging.INFO)
 
 AUTH_TOKEN = os.environ.get('RC_HELPER_TOKEN', '')
 START_TS = time.time()
