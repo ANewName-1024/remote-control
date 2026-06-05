@@ -38,6 +38,7 @@ What these tests cover
 - _run_main_loop: 3-fail force-reconnect sets the event so the
   next loop iteration exits
 """
+import json
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -312,3 +313,103 @@ def test_thread_excepthook_installed():
     assert ws_bridge.threading.excepthook is not None
     # Should be our handler, not the default no-op.
     assert ws_bridge.threading.excepthook.__name__ == '_thread_excepthook'
+
+
+# ---------------------------------------------------------------------------
+# Outgoing message queue: _send() must NOT block on TCP back-pressure
+# ---------------------------------------------------------------------------
+# This is the fix for the 2026-06-05/06 symptom where frame_pump
+# silently died (queue full, dropping frame) when the server stalled
+# (clients=0). Root cause: self._ws.send() blocked under TCP
+# back-pressure, holding frame_pump forever, so it never drained the
+# frame queue. The fix routes _send() through a non-blocking queue
+# flushed by _ws_loop main loop, so send back-pressure only stalls
+# the WS reader and never reaches frame_pump.
+
+def test_send_is_nonblocking_when_outgoing_q_full(bridge):
+    """_send() must NEVER block, even if the queue is saturated.
+
+    Fill the outgoing queue past capacity, then call _send(). It
+    must return immediately (no block) and bump the drop counter.
+    This is the contract that protects frame_pump from TCP
+    back-pressure on the WS path.
+    """
+    # Pre-fill: maxsize=512, plus one extra that will be dropped.
+    for i in range(512):
+        bridge._outgoing_q.put_nowait({'type': 'screen', 'seq': i})
+    assert bridge._outgoing_drops == 0
+
+    # The 513th call must return immediately, NOT block.
+    t0 = time.time()
+    bridge._send({'type': 'screen', 'seq': 999})
+    elapsed = time.time() - t0
+    assert elapsed < 0.1, f'_send() blocked for {elapsed:.2f}s on a full queue'
+    assert bridge._outgoing_drops == 1
+
+
+def test_flush_outgoing_q_drains_all_pending(bridge):
+    """_flush_outgoing_q() must call ws.send() for every queued msg
+    and clear the queue.
+    """
+    # Put 10 messages, then flush once.
+    for i in range(10):
+        bridge._send({'type': 'screen', 'seq': i})
+    assert bridge._outgoing_q.qsize() == 10
+
+    bridge._flush_outgoing_q()
+
+    # ws.send was called 10 times (once per message).
+    assert bridge._ws.send.call_count == 10
+    # Queue is empty.
+    assert bridge._outgoing_q.qsize() == 0
+    # No drops.
+    assert bridge._outgoing_drops == 0
+
+
+def test_flush_outgoing_q_drops_rest_on_send_failure(bridge):
+    """If ws.send() raises (socket dead), _flush_outgoing_q must
+    drain the rest of the queue instead of holding stale messages
+    that would be re-sent after a reconnect.
+    """
+    # Queue 5 messages, then ws.send raises on the very first one.
+    for i in range(5):
+        bridge._send({'type': 'screen', 'seq': i})
+    bridge._ws.send.side_effect = Exception('socket dead')
+
+    bridge._flush_outgoing_q()
+
+    # ws.send attempted exactly once (then we gave up and drained).
+    assert bridge._ws.send.call_count == 1
+    # Queue is empty -- we did NOT re-enqueue for a future flush.
+    assert bridge._outgoing_q.qsize() == 0
+
+
+# ---------------------------------------------------------------------------
+# cmds_sent counter: must increment on successful WS->helper forward
+# ---------------------------------------------------------------------------
+# The counter was wired up in the heartbeat (cmds_sent=0 in stats
+# output) but never bumped in _on_server_msg, so the agent's
+# 30-second heartbeat always reported cmds_sent=0 even when we were
+# actively forwarding input. This test pins the behavior.
+
+def test_cmds_sent_increments_on_mouse(bridge):
+    """A 'mouse' message from the server must bump cmds_sent by 1
+    (on successful send_cmd) -- the heartbeat stat was always 0
+    before this fix.
+    """
+    assert bridge.cmds_sent == 0
+    bridge._on_server_msg({
+        'type': 'mouse', 'x': 100, 'y': 200,
+        'button': 'left', 'action': 'click',
+    })
+    assert bridge.cmds_sent == 1
+
+
+def test_cmds_sent_increments_on_key(bridge):
+    """A 'key' message from the server must bump cmds_sent by 1."""
+    assert bridge.cmds_sent == 0
+    bridge._on_server_msg({
+        'type': 'key', 'key': 'Enter', 'action': 'press',
+    })
+    assert bridge.cmds_sent == 1
+

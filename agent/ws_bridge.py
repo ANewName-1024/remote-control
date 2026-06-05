@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import queue
 import socket
 import ssl
 import struct
@@ -85,6 +86,20 @@ class WSBridge:
         self.secret = secret
         self.hostname = hostname
         self.os_info = os_info
+        # Outgoing message queue. frame_pump calls _send() many times
+        # per second; if the server stalls (no client connected, slow
+        # network, full TCP send buffer) the underlying ws.send() can
+        # block for seconds, which in turn blocks frame_pump -- which
+        # in turn stops draining the frame queue, which makes the
+        # helper's frame_sender thread fill the frame pipe and start
+        # getting ERROR_NO_DATA (232) on WriteFile. The fix is to
+        # make _send() non-blocking (enqueue) and let the _ws_loop
+        # main loop flush the queue between recv() polls. That way
+        # send back-pressure only stalls the WS reader (which has
+        # nothing to do during a server stall anyway) and never
+        # reaches frame_pump.
+        self._outgoing_q: queue.Queue = queue.Queue(maxsize=512)
+        self._outgoing_drops: int = 0
         self._ws = None
         self._stop = threading.Event()
         self._connected = threading.Event()
@@ -293,6 +308,13 @@ class WSBridge:
         pending = None  # (seq, sent_at) tuple or None
 
         while not self._stop.is_set() and not self._force_reconnect_event.is_set():
+            # 0. Flush any pending outgoing messages. This is what
+            #    keeps _send() non-blocking for frame_pump: even if
+            #    the WS write takes seconds (server stall, no
+            #    client, slow network), only THIS thread stalls, and
+            #    only the next 0.5s recv poll is delayed.
+            self._flush_outgoing_q()
+
             # 1. Poll recv. WebSocketTimeoutException is expected
             #    (0.5s of no business messages); keep waiting.
             try:
@@ -487,6 +509,7 @@ class WSBridge:
                     'action': msg.get('action', 'move'),
                 }
                 self.pipes.send_cmd(cmd)
+                self.cmds_sent += 1
                 log.info(f'WS->helper mouse {cmd["action"]} ({cmd["x"]},{cmd["y"]}) {cmd["button"]}')
             except Exception as e:
                 log.warning(f'WS->helper mouse forward failed: {e}')
@@ -504,6 +527,7 @@ class WSBridge:
                     'action': msg.get('action', 'press'),
                 }
                 self.pipes.send_cmd(cmd)
+                self.cmds_sent += 1
                 log.info(f'WS->helper key {cmd["action"]} "{cmd["key"]}"')
             except Exception as e:
                 log.warning(f'WS->helper key forward failed: {e}')
@@ -513,6 +537,7 @@ class WSBridge:
             self.cmds_recv += 1
             try:
                 self.pipes.send_cmd(msg)
+                self.cmds_sent += 1
             except Exception as e:
                 log.warning(f'WS->helper {t} forward failed: {e}')
             return
@@ -572,8 +597,67 @@ class WSBridge:
         return out
 
     def _send(self, msg: dict) -> None:
-        data = json.dumps(msg, ensure_ascii=False)
-        self._ws.send(data)
+        """Enqueue a message for the WS writer.
+
+        Non-blocking: if the outgoing queue is full (server is
+        stalled / no client / slow network), drop and log a warning
+        rather than block the caller (typically frame_pump). The
+        actual TCP/WS write is performed by _flush_outgoing_q()
+        inside the _ws_loop main loop.
+
+        The 512-slot queue is enough for ~30s of 60fps screen
+        captures even at a high data rate; in practice it stays
+        near-empty because _ws_loop drains it on every iteration
+        (the 0.5s recv poll returns between frames).
+        """
+        try:
+            self._outgoing_q.put_nowait(msg)
+        except queue.Full:
+            self._outgoing_drops += 1
+            if self._outgoing_drops % 100 == 1:
+                # Throttle: don't spam the log on sustained stalls.
+                log.warning(
+                    f'outgoing_q full, dropped msg type={msg.get("type")!r} '
+                    f'(total drops: {self._outgoing_drops})'
+                )
+
+    def _flush_outgoing_q(self) -> None:
+        """Drain the outgoing queue, sending each message via WS.
+
+        Called by _ws_loop between recv() polls so send back-pressure
+        only stalls the WS reader (which has nothing to do during a
+        server stall anyway) and never reaches frame_pump.
+
+        We bound each flush to a small batch so a single slow
+        ws.send() doesn't starve recv() entirely; the next poll
+        picks up the rest.
+        """
+        # Bounded batch: at most 64 messages per flush. The next
+        # _run_main_loop iteration (within 0.5s) handles the rest.
+        for _ in range(64):
+            try:
+                msg = self._outgoing_q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                data = json.dumps(msg, ensure_ascii=False)
+                self._ws.send(data)
+            except Exception as e:
+                # Don't try to recover here; the recv() side will
+                # notice the dead socket via the next poll / keepalive
+                # and reconnect. We do NOT re-enqueue -- that would
+                # re-send stale frames after a reconnect.
+                log.warning(f'WS send failed in flush: {e}')
+                # Drop the rest of the queue too -- if ws.send
+                # raised, the socket is probably dead and the outer
+                # _ws_loop will reconnect. Holding the messages would
+                # just make them stale.
+                try:
+                    while True:
+                        self._outgoing_q.get_nowait()
+                except queue.Empty:
+                    pass
+                return
 
 
 # ---- stdlib fallback WS client (only used if websocket-client missing) ----
