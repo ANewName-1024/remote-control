@@ -152,17 +152,62 @@ SendInput 在 Session 0 / UAC / 锁屏场景下**静默 no-op**：pyautogui.move
 | V5 | pyautogui.position 报异常时 verify_at 返回 False 不崩溃 | `verify_at` V5 | U | P1 |
 | V6 | 无 pyautogui 时 verify_at 跳过验证 | `verify_at` V6 | U | P1 |
 | V7 | mouse('move') 后调用 verify_at(x, y) | `verify_at` V7 | U | P0 |
-| V8 | mouse('click') 不调 verify_at | `verify_at` V8 | U | P0 |
-| V9 | mouse('down') 不调 verify_at | `verify_at` V9 | U | P0 |
-| V10 | mouse('up') 不调 verify_at | `verify_at` V10 | U | P0 |
-| V11 | mouse('wheel') 不调 verify_at | `verify_at` V11 | U | P0 |
-| V12 | 真机: move + position 坐标对得上 | `smoke_test_mouse.py` Test 1 | E2E | P0 |
-| V13 | 真机: 二次 move 仍能到目标 | `smoke_test_mouse.py` Test 2 | E2E | P1 |
-| V14 | 真机: click 不抬 cursor | `smoke_test_mouse.py` Test 3 | E2E | P1 |
-| V15 | 真机: dragTo 结尾坐标 = 目标 | `smoke_test_mouse.py` Test 4 | E2E | P1 |
-| V16 | 真机: verify_at 在真机上能识别 mismatch | `smoke_test_mouse.py` Test 5 | E2E | P0 |
+| V8 | mouse('click') 调 verify_at + is_button_up | `verify_at` V8 | U | P0 |
+| V9 | mouse('down') 调 verify_at (不调 is_button_up) | `verify_at` V9 | U | P0 |
+| V10 | mouse('up') 调 is_button_up (不调 verify_at) | `verify_at` V10 | U | P0 |
+| V11 | mouse('wheel') 不调任何 verify | `verify_at` V11 | U | P0 |
+| V12 | mouse('double_click') 调两个 verify | `verify_at` V12 | U | P0 |
+| V13 | 真机: move + position 坐标对得上 | `smoke_test_mouse.py` Test 1 | E2E | P0 |
+| V14 | 真机: 二次 move 仍能到目标 | `smoke_test_mouse.py` Test 2 | E2E | P1 |
+| V15 | 真机: click 不抬 cursor | `smoke_test_mouse.py` Test 3 | E2E | P1 |
+| V16 | 真机: dragTo 结尾坐标 = 目标 | `smoke_test_mouse.py` Test 4 | E2E | P1 |
+| V17 | 真机: verify_at 在真机上能识别 mismatch | `smoke_test_mouse.py` Test 5 | E2E | P0 |
+| V18 | 真机: is_button_up 能识别 click 后按钮状态 | `smoke_test_mouse.py` Test 6 | E2E | P0 |
+| V19 | 真机: is_key_up 能识别 key release 后状态 | `smoke_test_mouse.py` Test 7 | E2E | P0 |
 
-V12-V16 需要真机跑：设 `RC_RUN_E2E=1` 后 `run_all_tests.ps1` 才会执行。默认跳过 (会在屏幕上点)。
+V13-V19 需要真机跑：设 `RC_RUN_E2E=1` 后 `run_all_tests.ps1` 才会执行。默认跳过 (会在屏幕上点)。
+
+### B. Agent 鼠标按钮状态静默失败防护（`agent/input_inject.py:is_button_up`）
+
+| ID | 功能点 | 测试 | 类型 | 优先级 |
+|----|--------|------|------|--------|
+| B1 | is_button_up 按钮 UP (0x8000 bit 清) 返回 True | `input_verify_ext` B1 | U | P0 |
+| B2 | is_button_up 按钮 DOWN (0x8000 bit 置) 返回 False | `input_verify_ext` B2 | U | P0 |
+| B3 | left/right/middle 三个按钮 VK 码 (0x01/0x02/0x04) 都正确 | `input_verify_ext` B3 | U | P0 |
+| B4 | 未知按钮名返回 True (不崩) | `input_verify_ext` B4 | U | P1 |
+| B5 | 按钮 stuck 时 log warning | `input_verify_ext` B5 | U | P0 |
+
+### K. Agent 键盘状态静默失败防护（`agent/input_inject.py:is_key_up`）
+
+| ID | 功能点 | 测试 | 类型 | 优先级 |
+|----|--------|------|------|--------|
+| K1 | is_key_up key UP 返回 True | `input_verify_ext` K1 | U | P0 |
+| K2 | is_key_up key DOWN 返回 False | `input_verify_ext` K2 | U | P0 |
+| K3 | 忽略 low-bit transition flag (0x0001) | `input_verify_ext` K3 | U | P0 |
+| K4 | key stuck 时 log warning | `input_verify_ext` K4 | U | P0 |
+
+### N. Agent ctypes fallback 命名键修复（`agent/input_inject.py:_key_to_vk`）
+
+原 bug: `vk = ... if len(key) == 1 else 0` — 命名键 (ctrl/alt/tab/...) 直接 vk=0 静默丢。修法: 加 _NAMED_KEY_VK 表 + _key_to_vk() 函数。
+
+| ID | 功能点 | 测试 | 类型 | 优先级 |
+|----|--------|------|------|--------|
+| N1 | 16 个常用命名键都正确解析 | `input_verify_ext` N1 | U | P0 |
+| N2 | 大小写不敏感 (Ctrl/CTRL/ctrl) | `input_verify_ext` N2 | U | P1 |
+| N3 | 空字符串返回 None 不崩 | `input_verify_ext` N3 | U | P1 |
+| N4 | 未知命名键返回 None (不发 VK=0) | `input_verify_ext` N4 | U | P0 |
+| N5 | 单字符用 VkKeyScanW | `input_verify_ext` N5 | U | P0 |
+| N6 | 大写字母脱掉 shift bit | `input_verify_ext` N6 | U | P1 |
+| N7 | 不可映射字符 (control char) 返回 None | `input_verify_ext` N7 | U | P1 |
+| N8 | key() 调 _key_to_vk 返回 None 时 log + skip | `input_verify_ext` N8 | U | P0 |
+
+### KU. Agent 键盘 verify 接线（`agent/input_inject.py:key` 调用 `is_key_up`）
+
+| ID | 功能点 | 测试 | 类型 | 优先级 |
+|----|--------|------|------|--------|
+| KU1 | key('enter', 'press') 后调 is_key_up | `input_verify_ext` KU1 | U | P0 |
+| KU2 | key('a', 'down') 不调 is_key_up (半周期) | `input_verify_ext` KU2 | U | P0 |
+| KU3 | key('a', 'up') 不调 is_key_up (半周期) | `input_verify_ext` KU3 | U | P0 |
 
 ### R. Agent 日志轮转（`agent/log_rotation.py` + 集成到 3 个脚本）
 

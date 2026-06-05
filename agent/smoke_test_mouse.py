@@ -210,6 +210,56 @@ def main() -> int:
             _fail(f'verify_at() raised: {e}')
             failures += 1
 
+        # ---- 6. is_button_up() helper test ----
+        # After a click(), the mouse button MUST be UP. If still
+        # DOWN, the click's 'up' half was lost — symptom of
+        # Session 0 / UAC / display lock.
+        _section('Test 6: agent.input_inject.is_button_up() (button state guard)')
+        try:
+            from agent.input_inject import is_button_up
+            # Click somewhere safe (a position we already used)
+            pyautogui.click(target_a[0], target_a[1], button='left')
+            time.sleep(0.1)
+            if is_button_up('left'):
+                _pass('is_button_up("left") returned True after click (button released)')
+            else:
+                _fail('is_button_up("left") returned False after click — button stuck DOWN')
+                _fail('  -> SendInput "mouseUp" half was lost')
+                failures += 1
+            # Right button: we never clicked it, so should be UP
+            if is_button_up('right'):
+                _pass('is_button_up("right") returned True (never pressed)')
+            else:
+                _fail('is_button_up("right") returned False unexpectedly')
+                failures += 1
+        except Exception as e:
+            _fail(f'is_button_up() raised: {e}')
+            failures += 1
+
+        # ---- 7. is_key_up() helper test ----
+        # After key('a', 'press'), the 'A' key MUST be UP.
+        # If still DOWN, the 'keyUp' half was lost.
+        _section('Test 7: agent.input_inject.is_key_up() (key state guard)')
+        try:
+            from agent.input_inject import is_key_up
+            # Use pyautogui directly to inject 'a' press
+            pyautogui.press('a')
+            time.sleep(0.1)
+            if is_key_up(0x41):  # VK_A
+                _pass('is_key_up(VK_A) returned True after press("a") (key released)')
+            else:
+                _fail('is_key_up(VK_A) returned False after press — key stuck DOWN')
+                failures += 1
+            # Test against an unrelated key that we never pressed
+            if is_key_up(0x1B):  # VK_ESCAPE
+                _pass('is_key_up(VK_ESCAPE) returned True (never pressed)')
+            else:
+                _fail('is_key_up(VK_ESCAPE) returned False unexpectedly')
+                failures += 1
+        except Exception as e:
+            _fail(f'is_key_up() raised: {e}')
+            failures += 1
+
     finally:
         # Always restore the cursor. The test fails are useless
         # if the user is left with their cursor at (700, 700) and

@@ -58,7 +58,7 @@ if ($python) {
     # the suite via agent/tests/ collection; no path manipulation
     # needed.
     Write-Host ""
-    Write-Host ">>> Running: Python tests (pytest, agent/tests/, 78+1skip)" -ForegroundColor Yellow
+    Write-Host ">>> Running: Python tests (pytest, agent/tests/, 119+1skip)" -ForegroundColor Yellow
     $p = Start-Process -FilePath 'python' -ArgumentList @('-m', 'pytest', 'agent/tests/', '-v') -NoNewWindow -Wait -PassThru -WorkingDirectory $ScriptDir
     $results += [PSCustomObject]@{
         Name = 'Python pytest (delta_encoder 12 + mouse_keyboard 51 + wgc 9 + ws_input_bridge 7 = 79 tests)'
