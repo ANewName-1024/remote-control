@@ -50,22 +50,23 @@ Write-Host "========================================" -ForegroundColor Cyan
 
 $python = (Get-Command python -ErrorAction SilentlyContinue)
 if ($python) {
+    # Run from the project root (NOT the agent/ subdir) so that
+    # 'agent' resolves to the agent/ PACKAGE (with its _PackageModule
+    # re-export shim) rather than to the legacy single-file
+    # agent/agent.py that would shadow the package. pytest discovers
+    # the suite via agent/tests/ collection; no path manipulation
+    # needed.
     Write-Host ""
-    Write-Host ">>> Running: Python tests (Delta Encoder + Mouse/Keyboard + WGC)" -ForegroundColor Yellow
-    Push-Location (Join-Path $ScriptDir 'agent')
-    try {
-        $p = Start-Process -FilePath 'python' -ArgumentList @('-m', 'unittest', 'tests.test_delta_encoder', 'tests.test_mouse_keyboard', 'tests.test_wgc', '-v') -NoNewWindow -Wait -PassThru
-        $results += [PSCustomObject]@{
-            Name = 'Python unittest (delta_encoder 12 + mouse_keyboard 51 + wgc 9 = 72 tests)'
-            ExitCode = $p.ExitCode
-        }
-        if ($p.ExitCode -ne 0) {
-            Write-Host "<<< FAILED: Python tests (exit $p.ExitCode)" -ForegroundColor Red
-        } else {
-            Write-Host "<<< PASSED: Python tests" -ForegroundColor Green
-        }
-    } finally {
-        Pop-Location
+    Write-Host ">>> Running: Python tests (pytest, agent/tests/, 78+1skip)" -ForegroundColor Yellow
+    $p = Start-Process -FilePath 'python' -ArgumentList @('-m', 'pytest', 'agent/tests/', '-v') -NoNewWindow -Wait -PassThru -WorkingDirectory $ScriptDir
+    $results += [PSCustomObject]@{
+        Name = 'Python pytest (delta_encoder 12 + mouse_keyboard 51 + wgc 9 + ws_input_bridge 7 = 79 tests)'
+        ExitCode = $p.ExitCode
+    }
+    if ($p.ExitCode -ne 0) {
+        Write-Host "<<< FAILED: Python tests (exit $p.ExitCode)" -ForegroundColor Red
+    } else {
+        Write-Host "<<< PASSED: Python tests" -ForegroundColor Green
     }
 } else {
     Write-Host "Python not found, skipping Python tests" -ForegroundColor DarkYellow

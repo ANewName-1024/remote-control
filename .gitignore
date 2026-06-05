@@ -13,6 +13,13 @@ server/static/app/
 server/uploads/
 server/agent_logs/
 
+# Developer-local launch scripts (point at a specific user profile
+# under C:\Users\<user>\AppData\... so they aren't portable). The
+# leading underscore follows the convention of marking a file as
+# "scratch / not for the repo"; matching pattern is _*.ps1 at repo
+# root.
+_*.ps1
+
 # Backup of previously corrupted AGENT.md (kept for diff reference)
 AGENT.md.old
 

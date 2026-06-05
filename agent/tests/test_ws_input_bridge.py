@@ -54,11 +54,25 @@ class TestWsToHelperInputTranslation(unittest.TestCase):
         with patch.object(self.ws_bridge, 'WSBridge') as Ctor:
             pass  # placeholder; we just need the class
         # Instantiate directly, bypassing __init__ because the real
-        # one opens sockets and spawns threads.
+        # one opens sockets and spawns threads. We MUST mirror every
+        # attribute that _on_server_msg (or any other method we
+        # exercise) reads from self.* — the real __init__ sets all of
+        # these, and the dict is the source of truth. Keeping the
+        # list short on purpose: if a future test touches a new
+        # attribute, _on_server_msg will fail loudly with an
+        # AttributeError at the first read, prompting us to add it
+        # here (which is the same fail-mode the source would hit if
+        # __init__ ever forgot to initialize a field).
         self.bridge = self.ws_bridge.WSBridge.__new__(self.ws_bridge.WSBridge)
         self.bridge.pipes = self.pipes
         self.bridge.cmds_recv = 0
         self.bridge._disposed = False
+        # Required by _on_server_msg (line 323 of ws_bridge.py):
+        # the per-msg-type counter is bumped on every non-ping msg.
+        self.bridge._msg_type_stats = {}
+        # Required when the test sends 'seq' in a mouse/key payload:
+        # the bridge records the highest seq it has processed.
+        self.bridge._last_input_seq = 0
 
     def tearDown(self):
         # No real threads/timers were created; nothing to clean up.
