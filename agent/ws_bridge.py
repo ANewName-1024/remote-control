@@ -90,6 +90,17 @@ class WSBridge:
         # Reconnect bookkeeping
         self._reconnect_attempt: int = 0
         self._last_connected_at: float = 0.0
+        # Half-dead WS detection. We used to be "log + continue on
+        # any keepalive failure" but that meant a half-dead WS
+        # (server still sends keepalive_ack but agent->server frames
+        # all fail) goes undetected for hours: the agent's frame_pump
+        # silently logs WinError 10054 every second while server sees
+        # no traffic. Now we count consecutive failures: 1-2 are
+        # probably network jitter (preserve coordinate-mapping, do
+        # not reset), 3+ in a row means WS is half-dead and we force
+        # a close so the outer _ws_loop reconnects. Reset to 0 on
+        # any successful probe.
+        self._consecutive_keepalive_failures: int = 0
         # Stats
         self.frames_sent = 0
         self.cmds_recv = 0
@@ -289,19 +300,56 @@ class WSBridge:
                     # cadence, in which case the WS is also
                     # effectively degraded.
                     raise ConnectionError(f'keepalive #{seq}: ack seq mismatch (got {self._keepalive_ack_seq[0]})')
+                # Probe succeeded -- reset the consecutive-failure
+                # counter so a single past failure doesn't keep us
+                # one probe away from a forced reconnect.
+                self._consecutive_keepalive_failures = 0
             except Exception as e:
-                # The keepalive probe failed (no ack, or seq
-                # mismatch). Log it for diagnosis. We used to
-                # close the socket and force a reconnect here, but
-                # we discovered that any proactive close mid-session
-                # resets the App's coordinate mapping / scale
-                # reference -- the next user click lands in the
-                # wrong place. So now we just log and let the
-                # outer _ws_loop keep running. If the WS is
-                # actually broken, the recv() will eventually raise
-                # on its own and trigger a natural reconnect.
-                log.warning(f'WS keepalive probe failed (continuing, no auto-reconnect to avoid coordinate-mapping reset): {e}')
-                self._keepalive_ack.clear()
+                self._consecutive_keepalive_failures += 1
+                if self._consecutive_keepalive_failures >= 3:
+                    # 3 consecutive keepalive failures in a row
+                    # (~75-90s wall time) means the WS is half-dead:
+                    # the server can still send us keepalive_acks
+                    # (or we are not detecting the ack in time), but
+                    # our own outbound direction is broken --
+                    # evidenced by frame_pump logging WinError 10054
+                    # every second. Force a close so the next recv()
+                    # in _connect() raises ConnectionClosed and the
+                    # outer _ws_loop enters its reconnect branch.
+                    # The cost is a brief App-side coordinate
+                    # remapping (HELLO/screen_size re-negotiation),
+                    # which is much cheaper than 12 hours of silent
+                    # "agent online but not actually doing anything".
+                    log.error(
+                        f'WS keepalive probe failed {self._consecutive_keepalive_failures} '
+                        f'times in a row; forcing reconnect (WS half-dead): {e}'
+                    )
+                    self._consecutive_keepalive_failures = 0
+                    self._keepalive_ack.clear()
+                    try:
+                        if self._ws is not None:
+                            self._ws.close()
+                    except Exception as close_err:
+                        # Best effort: if close() itself raises, we
+                        # still want to fall through to time.sleep so
+                        # the loop doesn't spin here.
+                        log.warning(f'WS force-close raised: {close_err}')
+                else:
+                    # 1 or 2 consecutive failures -- most likely
+                    # network jitter, not a half-dead WS. The old
+                    # behavior was "log + continue, trust recv() to
+                    # detect the death", but recv() will NOT raise
+                    # for a half-dead WS (frame_pump errors are
+                    # async), so the connection can sit dead for
+                    # hours. We compromise: log loudly with a
+                    # "/3" counter so operators see we are N probes
+                    # from a forced reconnect.
+                    log.warning(
+                        f'WS keepalive probe failed '
+                        f'({self._consecutive_keepalive_failures}/3, will force '
+                        f'reconnect at 3): {e}'
+                    )
+                    self._keepalive_ack.clear()
             time.sleep(25.0)
 
     # ---- server -> helper ----
