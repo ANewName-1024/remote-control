@@ -127,8 +127,32 @@ class WSBridge:
         # websocket-client on Windows (it just sets a flag, the
         # socket isn't actually torn down until recv()'s own timeout
         # fires). The event is the canonical signal; the settimeout
-        # + close in _keepalive_loop is just a hint to speed it up.
+        # + close in _on_keepalive_failure is just a hint to speed
+        # it up.
         self._force_reconnect_event: threading.Event = threading.Event()
+        # Single-thread main loop tuning. _run_main_loop() polls
+        # recv() with a short timeout so it can also drive the
+        # keepalive tick on the same thread (this is the whole
+        # reason we merged _keepalive_loop into _ws_loop). 0.5s is
+        # the wakeup cadence: not so short that idle CPU burns, not
+        # so long that a forced reconnect feels laggy.
+        self._recv_poll_timeout: float = 0.5
+        self._keepalive_interval: float = 25.0
+        self._keepalive_ack_timeout: float = 5.0
+        self._keepalive_seq: int = 0
+        # _on_server_msg sets _keepalive_ack_seq[0] to the seq of
+        # the keepalive_ack it just processed. _run_main_loop reads
+        # this to know the pending probe succeeded. Single-element
+        # list so we can mutate it from _on_server_msg without a
+        # lock; both writers and readers are on the same thread.
+        self._keepalive_ack_seq: list = [0]
+        # The 25s cadence server ping is also tracked in
+        # _keepalive_ack (a threading.Event) so future
+        # code that runs in a different thread can still
+        # observe probe completion. Not used by the main loop
+        # anymore but kept for backward-compat with any caller
+        # (e.g. tests) that wakes on it.
+        self._keepalive_ack: threading.Event = threading.Event()
         # Stats
         self.frames_sent = 0
         self.cmds_recv = 0
@@ -139,7 +163,13 @@ class WSBridge:
 
     def start(self) -> None:
         """Start all bridge threads."""
-        for target in (self._ws_loop, self._frame_pump, self._heartbeat, self._keepalive_loop):
+        # Three threads (was four before the keepalive merge):
+        #   _ws_loop       - connect + recv + keepalive tick (single thread;
+        #                    keepalive used to be a separate thread that
+        #                    raced with the recv loop on `self._ws`)
+        #   _frame_pump    - helper pipe -> WS
+        #   _heartbeat     - 30s stats log
+        for target in (self._ws_loop, self._frame_pump, self._heartbeat):
             t = threading.Thread(target=target, daemon=True, name=f'ws-{target.__name__}')
             t.start()
             self._threads.append(t)
@@ -160,20 +190,42 @@ class WSBridge:
     # ---- connection loop ----
 
     def _ws_loop(self) -> None:
-        """Maintain a persistent WS connection with reconnect."""
+        """Maintain a persistent WS connection with reconnect.
+
+        Single-threaded: this thread owns the WS recv() loop AND the
+        keepalive tick. Combining them removes the cross-thread race
+        on ``self._ws`` that made the old design fragile (keepalive
+        closing the socket from one thread while _connect() was
+        blocking on recv() in another; the close was unreliable at
+        waking the recv on Windows, so the bridge could sit dead for
+        hours).
+
+        Trade-off: recv() now uses a short timeout (``_recv_poll_timeout``,
+        default 0.5s) so the keepalive tick can run every iteration.
+        That's ~2 wakeups/sec when idle, which is fine on a desktop
+        service.
+        """
         backoff = 1.0
         while not self._stop.is_set():
             try:
                 self._connect()
                 backoff = 1.0
                 self._reconnect_attempt = 0
-                # _connect blocks until disconnect
+                # _connect blocks until disconnect; the inner recv
+                # loop lives in _run_main_loop() now.
+                self._run_main_loop()
             except Exception as e:
                 self.last_error = repr(e)
                 self._connected.clear()
                 self.ws_state = 'off'
                 self.auth_ok = False
                 self._reconnect_attempt += 1
+                # Clear the force-reconnect signal now that we've
+                # acted on it. _run_main_loop leaves it set when it
+                # raises so a test (or any external observer) can
+                # still see why the disconnect happened; we own the
+                # cleanup here.
+                self._force_reconnect_event.clear()
                 # Distinguish 'first connect' from 'reconnect N'
                 if self._reconnect_attempt == 1:
                     log.warning(f'WS disconnected: {e}; reconnecting in {backoff:.1f}s')
@@ -195,14 +247,15 @@ class WSBridge:
         if HAVE_WSCLIENT:
             self._ws = websocket.WebSocket()
             self._ws.connect(url, timeout=10)
-            # Long recv timeout: we don't expect a steady stream of business
-            # messages from the server (it only pushes input events on demand).
-            # A short timeout here used to cause spurious "Connection timed out"
-            # disconnects when the user just sits idle. The server sends WS
-            # protocol pings every 25s (see server/index.js heartbeat) and
-            # websocket-client handles those internally without surfacing them
-            # to recv(), so blocking for a long time is safe.
-            self._ws.settimeout(3600)
+            # Short recv timeout: _run_main_loop() polls recv() in a
+            # loop so the keepalive tick can run on the same thread
+            # (see _ws_loop docstring for why we merged the threads).
+            # 0.5s strikes a balance: not so short that we burn CPU
+            # on idle, not so long that force-reconnect feels laggy.
+            # The server sends WS protocol pings every ~25s, which
+            # websocket-client handles internally without surfacing
+            # to recv(), so the short timeout is safe.
+            self._ws.settimeout(self._recv_poll_timeout)
         else:
             self._ws = _StdlibWSClient(url)
             self._ws.connect()
@@ -219,191 +272,172 @@ class WSBridge:
             'os': self.os_info,
         })
         self._connected.set()
-        # Loop: read messages from server, dispatch to helper.
-        # We swallow WebSocketTimeoutException (idle timeout) and keep waiting,
-        # so an idle user doesn't cause a reconnect storm. Anything else
-        # (socket closed, protocol error) still bubbles up to reconnect.
-        #
-        # We also poll ``_force_reconnect_event`` on every iteration: when
-        # _keepalive_loop flags the WS as half-dead, we want to break out of
-        # this loop *promptly* and let the outer _ws_loop reconnect, instead
-        # of waiting up to 3600s for recv()'s own timeout to fire.
+        # The actual recv/keepalive loop moved to _run_main_loop()
+        # so this thread does not need to share `self._ws` with a
+        # separate keepalive thread.
+
+    def _run_main_loop(self) -> None:
+        """Single-threaded recv + keepalive tick loop.
+
+        Runs in the same thread as _ws_loop, after _connect() has
+        finished the handshake. Exits by raising if the WS dies or
+        force-reconnect is requested, which falls back into the
+        outer _ws_loop reconnect branch.
+
+        Structure: short-timeout recv() poll, then a keepalive tick.
+        The short timeout is the *only* way we yield to the
+        keepalive scheduler; the alternative (a second thread) is
+        what got us into the cross-thread race we just deleted.
+        """
+        last_keepalive_send = 0.0
+        pending = None  # (seq, sent_at) tuple or None
+
         while not self._stop.is_set() and not self._force_reconnect_event.is_set():
+            # 1. Poll recv. WebSocketTimeoutException is expected
+            #    (0.5s of no business messages); keep waiting.
             try:
                 raw = self._ws.recv()
                 if not raw:
                     raise ConnectionError('server closed')
-                msg = json.loads(raw)
-                # Switch to 'authed' as soon as we see auth_ok from server.
-                # This is the moment remote clients can actually use us.
-                if msg.get('type') == 'auth_ok' and not self.auth_ok:
-                    self.auth_ok = True
-                    self.ws_state = 'authed'
-                    log.info(f'WS auth_ok: agent_id={msg.get("agentId")} ready for remote clients')
-                try:
-                    self._on_server_msg(msg)
-                except Exception as e:
-                    log.warning(f"WS->helper msg handler error: {e}", exc_info=True)
-                    continue
+                self._handle_business_msg(raw)
             except WebSocketTimeoutException:
-                # No business message in 1h - that's fine, server is alive
-                # (heartbeat pings keep the TCP/WS connection warm).
-                continue
+                # Idle. Drive the keepalive tick below.
+                pass
             except Exception as e:
                 log.warning(f'WS recv error: {e}')
                 raise
-        # Loop exit: only happens if _stop or _force_reconnect_event fired.
-        # If we were asked to force-reconnect, surface a clear reason so
-        # the outer _ws_loop can log it on the next iteration.
-        if self._force_reconnect_event.is_set():
-            self._force_reconnect_event.clear()
-            raise ConnectionError('force-reconnect requested by keepalive (WS half-dead)')
 
-    def _keepalive_loop(self) -> None:
-        """Send a small business keepalive every 25s.
-
-        Two purposes:
-
-        1. Refresh the server's AGENTS[id].lastSeen so the server's
-           keepalive-timeout gate (and the new socket-fd /
-           bufferedAmount gates) know the agent is alive.
-
-        2. Detect a silent half-close from the agent's side. The
-           server sends WS protocol pings every 10s, which keep the
-           TCP connection warm and let the agent's recv() notice a
-           dead socket eventually. But on the *server* side the same
-           is not symmetric: if server-side network dies, server's
-           AGENTS[id].lastSeen keeps refreshing (the server sees its
-           own outbound ping replies from the dead socket's kernel
-           buffer) but the agent doesn't know the server is gone --
-           agent's _ws.recv() blocks in 3600s timeout forever. The
-           server-restart case (systemctl restart) is the same shape:
-           server dies without sending a WebSocket close frame, the
-           agent's recv() blocks, and ws_loop never reconnects.
-
-        To break this, every 25s the keepalive sends a real JSON
-        message and also lowers the recv() timeout for a moment:
-        the next recv() iteration will time out in 5s, the inner
-        while loop will raise, the outer _ws_loop except block will
-        run, and we'll reconnect. If the socket is actually fine
-        the recv() returns immediately and we go back to 25s.
-        """
-        # Set up round-trip ack machinery. _on_server_msg sets the
-        # event when a 'keepalive_ack' arrives. The seq is a single
-        # element list so _on_server_msg can mutate it without
-        # requiring a lock.
-        self._keepalive_ack = threading.Event()
-        self._keepalive_ack_seq = [0]
-        self._keepalive_seq = 0
-
-        while not self._stop.is_set():
-            # Wait until _connect() has set the connection event.
-            self._connected.wait(timeout=1.0)
-            if self._stop.is_set():
-                return
-            # Small post-auth grace period so we don't send keepalive
-            # before auth_ok arrives.
-            for _ in range(25):
-                if self._stop.is_set() or self.auth_ok:
-                    break
-                time.sleep(1.0)
-            if self._stop.is_set() or not self.auth_ok:
-                continue
-            try:
-                # Round-trip probe. The server's keepalive handler
-                # replies with {'type':'keepalive_ack', ts:<our_ts>}.
-                # We block up to 5s for the ack -- if it doesn't come,
-                # the outbound side of the WS is half-dead, and we
-                # raise to force a reconnect. We do this on a
-                # monotonic timestamp so a delayed ack from a previous
-                # cycle (e.g. if the previous keepalive was sent and
-                # then we just missed the ack) doesn't satisfy the
-                # current probe.
-                self._keepalive_seq = getattr(self, '_keepalive_seq', 0) + 1
-                seq = self._keepalive_seq
-                self._send({'type': 'keepalive', 'ts': time.time(), 'seq': seq})
-                # Wait for the matching ack via the event that
-                # _on_server_msg sets. If the socket is dead, the
-                # next recv() iteration in _connect() will block --
-                # but _send() succeeded just now, so the recv() will
-                # return at least one frame eventually. If after
-                # 5s the ack hasn't arrived, force-close so the next
-                # recv() raises ConnectionClosed and the outer
-                # _ws_loop enters its reconnect branch.
-                if not self._keepalive_ack.wait(timeout=5.0):
-                    raise ConnectionError(f'keepalive #{seq}: no ack from server in 5s (server->agent direction is half-dead)')
-                if self._keepalive_ack_seq[0] < seq:
-                    # An older ack arrived but not ours -- treat as
-                    # missing. This happens if the recv() loop in
-                    # _connect() is running far behind the keepalive
-                    # cadence, in which case the WS is also
-                    # effectively degraded.
-                    raise ConnectionError(f'keepalive #{seq}: ack seq mismatch (got {self._keepalive_ack_seq[0]})')
-                # Probe succeeded -- reset the consecutive-failure
-                # counter so a single past failure doesn't keep us
-                # one probe away from a forced reconnect.
-                self._consecutive_keepalive_failures = 0
-            except Exception as e:
-                self._consecutive_keepalive_failures += 1
-                if self._consecutive_keepalive_failures >= 3:
-                    # 3 consecutive keepalive failures in a row
-                    # (~75-90s wall time) means the WS is half-dead:
-                    # the server can still send us keepalive_acks
-                    # (or we are not detecting the ack in time), but
-                    # our own outbound direction is broken --
-                    # evidenced by frame_pump logging WinError 10054
-                    # every second. Force a close so the next recv()
-                    # in _connect() raises ConnectionClosed and the
-                    # outer _ws_loop enters its reconnect branch.
-                    # The cost is a brief App-side coordinate
-                    # remapping (HELLO/screen_size re-negotiation),
-                    # which is much cheaper than 12 hours of silent
-                    # "agent online but not actually doing anything".
-                    log.error(
-                        f'WS keepalive probe failed {self._consecutive_keepalive_failures} '
-                        f'times in a row; forcing reconnect (WS half-dead): {e}'
-                    )
+            # 2. Drive keepalive. Two phases: send a fresh probe
+            #    when the interval has elapsed, otherwise check the
+            #    pending probe for an ack or timeout.
+            now = time.time()
+            if pending is None:
+                if now - last_keepalive_send >= self._keepalive_interval:
+                    seq = self._next_keepalive_seq()
+                    self._send({'type': 'keepalive', 'ts': now, 'seq': seq})
+                    pending = (seq, now)
+                    last_keepalive_send = now
+            else:
+                seq, sent_at = pending
+                # Did the ack arrive (was set in _on_server_msg)?
+                if self._keepalive_ack_seq[0] >= seq:
                     self._consecutive_keepalive_failures = 0
                     self._keepalive_ack.clear()
-                    # Step 1: set the cross-thread signal first. This is
-                    # the *guaranteed* way to wake _connect()'s recv()
-                    # loop: it polls the event every iteration.
-                    self._force_reconnect_event.set()
-                    # Step 2: best-effort close + short timeout so any
-                    # recv() call that is *already* blocked wakes up
-                    # quickly. On Windows, websocket-client's close()
-                    # doesn't always interrupt a 3600s blocking recv
-                    # immediately, so the event-based wake is the
-                    # real fix; this is just a latency optimization.
-                    try:
-                        if self._ws is not None:
-                            try:
-                                self._ws.settimeout(0.1)
-                            except Exception:
-                                pass
-                            self._ws.close()
-                    except Exception as close_err:
-                        # Best effort: if close() itself raises, we
-                        # still want to fall through to time.sleep so
-                        # the loop doesn't spin here.
-                        log.warning(f'WS force-close raised: {close_err}')
-                else:
-                    # 1 or 2 consecutive failures -- most likely
-                    # network jitter, not a half-dead WS. The old
-                    # behavior was "log + continue, trust recv() to
-                    # detect the death", but recv() will NOT raise
-                    # for a half-dead WS (frame_pump errors are
-                    # async), so the connection can sit dead for
-                    # hours. We compromise: log loudly with a
-                    # "/3" counter so operators see we are N probes
-                    # from a forced reconnect.
-                    log.warning(
-                        f'WS keepalive probe failed '
-                        f'({self._consecutive_keepalive_failures}/3, will force '
-                        f'reconnect at 3): {e}'
+                    pending = None
+                    continue
+                # Hard timeout: did the ack window expire?
+                if now - sent_at > self._keepalive_ack_timeout:
+                    self._on_keepalive_failure(
+                        f'keepalive #{seq}: no ack in '
+                        f'{self._keepalive_ack_timeout:.1f}s '
+                        f'(server->agent direction is half-dead)'
                     )
-                    self._keepalive_ack.clear()
-            time.sleep(25.0)
+                    pending = None
+                    if self._force_reconnect_event.is_set():
+                        # _on_keepalive_failure already set the event
+                        # at failure 3/3; the next while-iteration
+                        # check will exit.
+                        pass
+
+        if self._force_reconnect_event.is_set():
+            # Don't clear here -- the outer _ws_loop's except branch
+            # clears it after logging the disconnect reason. Keeping
+            # it set until then means a test that catches the
+            # ConnectionError can still assert is_set() is True and
+            # know the force-reconnect was the cause.
+            raise ConnectionError('force-reconnect requested by keepalive (WS half-dead)')
+
+    def _handle_business_msg(self, raw: str) -> None:
+        """Decode + dispatch one business message from the server.
+
+        Pulled out of the recv() inner loop so _run_main_loop() can
+        stay short and so test code can drive it directly with a
+        JSON string. The keepalive_ack_seq[0] write here is what
+        _run_main_loop's keepalive tick reads to know the ack came
+        back; both happen on the same thread, so the single-element
+        list trick needs no lock.
+        """
+        msg = json.loads(raw)
+        if msg.get('type') == 'auth_ok' and not self.auth_ok:
+            self.auth_ok = True
+            self.ws_state = 'authed'
+            log.info(f'WS auth_ok: agent_id={msg.get("agentId")} ready for remote clients')
+        try:
+            self._on_server_msg(msg)
+        except Exception as e:
+            log.warning(f"WS->helper msg handler error: {e}", exc_info=True)
+
+    def _next_keepalive_seq(self) -> int:
+        """Bump and return the next keepalive sequence number."""
+        self._keepalive_seq += 1
+        return self._keepalive_seq
+
+    def _on_keepalive_failure(self, reason: str) -> None:
+        """Record a keepalive probe failure; force reconnect at 3/3.
+
+        Replaces the old _keepalive_loop's failure branch. Called by
+        _run_main_loop when a pending keepalive's ack window
+        expires. Side effects:
+          - increments _consecutive_keepalive_failures
+          - logs the failure with the current /3 count
+          - at 3/3, sets _force_reconnect_event (so _run_main_loop
+            exits), resets the counter, and best-effort closes the
+            socket to short-circuit any in-flight recv().
+        """
+        self._consecutive_keepalive_failures += 1
+        if self._consecutive_keepalive_failures >= 3:
+            # 3 consecutive keepalive failures in a row
+            # (~75-90s wall time) means the WS is half-dead: the
+            # server can still send us keepalive_acks (or we are not
+            # detecting the ack in time), but our own outbound
+            # direction is broken -- evidenced by frame_pump
+            # logging WinError 10054 every second. Force a close so
+            # the next recv() in _run_main_loop raises
+            # ConnectionClosed and the outer _ws_loop enters its
+            # reconnect branch. The cost is a brief App-side
+            # coordinate remapping (HELLO/screen_size
+            # re-negotiation), which is much cheaper than 12 hours
+            # of silent "agent online but not actually doing
+            # anything".
+            log.error(
+                f'WS keepalive probe failed {self._consecutive_keepalive_failures} '
+                f'times in a row; forcing reconnect (WS half-dead): {reason}'
+            )
+            self._consecutive_keepalive_failures = 0
+            self._keepalive_ack.clear()
+            # The event is the *guaranteed* wake for _run_main_loop:
+            # the next while-iteration check exits the loop. The
+            # settimeout + close is just a latency optimization so
+            # any recv() that's currently blocked wakes up quickly
+            # (websocket-client's close() doesn't reliably interrupt
+            # a blocking recv on Windows).
+            self._force_reconnect_event.set()
+            try:
+                if self._ws is not None:
+                    try:
+                        self._ws.settimeout(0.1)
+                    except Exception:
+                        pass
+                    self._ws.close()
+            except Exception as close_err:
+                # Best effort: even if close() raises we still want
+                # to fall through and let the next _run_main_loop
+                # poll see the force-reconnect event.
+                log.warning(f'WS force-close raised: {close_err}')
+        else:
+            # 1 or 2 consecutive failures -- most likely network
+            # jitter, not a half-dead WS. Log loudly with a "/3"
+            # counter so operators see we are N probes from a forced
+            # reconnect. The pending keepalive was already cleared
+            # by the caller; we just clear the ack event so the next
+            # probe starts clean.
+            log.warning(
+                f'WS keepalive probe failed '
+                f'({self._consecutive_keepalive_failures}/3, will force '
+                f'reconnect at 3): {reason}'
+            )
+            self._keepalive_ack.clear()
+
 
     # ---- server -> helper ----
 

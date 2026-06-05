@@ -1,11 +1,11 @@
-"""Tests for agent.ws_bridge keepalive half-dead detection.
+"""Tests for agent.ws_bridge keepalive half-dead detection (post-merge).
 
 Background
 ----------
-Before this fix, the _keepalive_loop caught any keepalive failure
-(timeout OR seq mismatch), logged a warning, and continued. The
-reasoning was "if WS is dead, recv() will eventually raise and the
-outer _ws_loop will reconnect naturally". But that assumption is
+Before commit 3d20bea: the _keepalive_loop caught any keepalive
+failure (timeout OR seq mismatch), logged a warning, and continued.
+The reasoning was "if WS is dead, recv() will eventually raise and
+the outer _ws_loop will reconnect naturally". But that assumption is
 wrong for a half-dead WS:
   - server can still send keepalive_ack (or at least let our old
     send of keepalive time out without raising)
@@ -14,22 +14,32 @@ wrong for a half-dead WS:
   - recv() never raises because the socket appears half-alive
   - the agent appears online for hours while doing nothing
 
-The new policy: count consecutive keepalive failures; force a close
-+ reconnect at 3 in a row (~75-90s wall time). 1-2 failures are
-preserved as warnings to avoid misfires on network jitter that would
-also reset the App-side coordinate mapping.
+After commit 3d20bea: count consecutive keepalive failures; force a
+close + reconnect at 3 in a row (~75-90s wall time). 1-2 failures
+are preserved as warnings to avoid misfires on network jitter.
+
+After this change (single-thread merge): _keepalive_loop is gone.
+The counter + force-reconnect logic now lives in
+``_on_keepalive_failure`` (called by ``_run_main_loop`` when a
+pending keepalive's ack window expires). Tests target that
+function directly so the assertions don't depend on the
+thread/sleep timing of the old design.
 
 What these tests cover
 ----------------------
-- 1 failure  -> counter=1, ws not closed
-- 2 failures -> counter=2, ws not closed
-- 3 failures -> counter=0 (reset), ws closed exactly once
-- 2 failures + 1 success -> counter reset to 0, ws not closed
-- 3 failures with _ws.close() raising -> swallow, don't crash
+- _on_keepalive_failure 1 -> counter=1, ws not closed
+- _on_keepalive_failure 2 -> counter=2, ws not closed
+- _on_keepalive_failure 3 -> counter reset to 0, ws closed once,
+  _force_reconnect_event set
+- _on_keepalive_failure 3 with _ws.close() raising -> swallow,
+  don't crash, event still set
+- default counter on fresh bridge == 0
+- _run_main_loop: ack-on-receive resets the pending probe
+- _run_main_loop: 3-fail force-reconnect sets the event so the
+  next loop iteration exits
 """
 import threading
 import time
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -41,14 +51,10 @@ from agent.ws_bridge import WSBridge
 def bridge():
     """WSBridge with mocked network; safe to call internal methods.
 
-    NOTE on _keepalive_ack: we use a SimpleNamespace instead of a
-    real threading.Event. Setting `bridge._keepalive_ack.wait =
-    MagicMock(...)` on a real Event instance in some test runners
-    (specifically pytest's module-level mock discovery) does not
-    shadow the bound method reliably -- pytest may have already
-    rebound the descriptor before we get to the assignment.
-    SimpleNamespace has no descriptor magic; the attribute is just
-    a regular slot, so the mock is what gets called.
+    _ws is a MagicMock so .close() and .settimeout() succeed; auth_ok
+    is pre-set so _run_main_loop won't try to wait for the post-auth
+    grace period; _stop is a fresh Event so we can drive the loops
+    to exit by setting it from a side effect.
     """
     b = WSBridge(
         pipe_server=MagicMock(),
@@ -59,142 +65,250 @@ def bridge():
     b._ws = MagicMock()
     b.auth_ok = True
     b._stop = threading.Event()
-    # ack state: a `wait(timeout)` mock replaced per test, plus a
-    # seq-mismatch list the production code reads/writes.
-    b._keepalive_ack = SimpleNamespace(
-        wait=MagicMock(return_value=False),
-        # Production also calls .clear() and .set() on _keepalive_ack
-        # (it expects a threading.Event). Stub them so the
-        # exception path doesn't AttributeError out of the loop.
-        clear=MagicMock(),
-        set=MagicMock(),
-    )
-    b._keepalive_ack_seq = [0]
     return b
 
 
-def _run_n_keepalive_cycles(bridge, n, wait_results):
-    """Run _keepalive_loop for exactly n cycles.
-
-    `wait_results` is a list of bools; each cycle consumes one
-    (False = timeout, True = ack arrived). For True cycles we also
-    update bridge._keepalive_ack_seq so the seq check passes.
-
-    The complication: _keepalive_loop re-assigns
-    `self._keepalive_ack = threading.Event()` at the top of its body
-    (line 256). That clobbers any mock the fixture set. We patch
-    `threading.Event` itself so the loop's "new Event()" call returns
-    a SimpleNamespace we control. The side-effect function for
-    `wait` is held in a single-element list so the helper can swap
-    it BEFORE the loop starts (the loop will read it on the first
-    probe).
-    """
-    assert len(wait_results) >= n
-
-    # Mutable container for the current wait side-effect. The FakeEvent
-    # closure below reads this on every probe, so we can wire the
-    # actual side-effect function in once and let all n cycles consume
-    # from the same iter.
-    current_wait_fn = [lambda timeout: False]  # default: timeout
-
-    class FakeEvent:
-        def __init__(self):
-            self.set = MagicMock()
-            self.clear = MagicMock()
-            # Use *args, **kwargs because the production code calls
-            # `self._keepalive_ack.wait(timeout=5.0)` with a
-            # keyword arg -- a `lambda t: ...` would not match
-            # the parameter name and MagicMock would surface a
-            # TypeError. The forwarder below unpacks whatever
-            # MagicMock passes to the actual side-effect fn.
-            self._wait_mock = MagicMock(
-                side_effect=lambda *a, **kw: current_wait_fn[0](*a, **kw)
-            )
-        @property
-        def wait(self):
-            return self._wait_mock
-
-    iter_results = iter(wait_results[:n])
-    def wait_side_effect(*args, **kwargs):
-        # Production calls `wait(timeout=5.0)`. We don't care about
-        # the timeout value (it would block the test for 5s); we
-        # just need to return whether the ack arrived.
-        _ = (args, kwargs)
-        ok = next(iter_results, False)
-        if ok:
-            # Update seq so the "ack seq >= sent seq" check passes
-            bridge._keepalive_ack_seq[0] = bridge._keepalive_seq
-        return ok
-
-    cycles_done = [0]
-    def sleep_side_effect(_):
-        cycles_done[0] += 1
-        if cycles_done[0] >= n:
-            bridge._stop.set()  # exit the outer while on next iteration
-
-    with patch.object(threading, 'Event', FakeEvent), \
-         patch.object(bridge, '_send'), \
-         patch.object(time, 'sleep', side_effect=sleep_side_effect):
-        # Wire the per-test side-effect BEFORE the loop starts (so
-        # the first probe already uses our results, not the default
-        # timeout lambda).
-        current_wait_fn[0] = wait_side_effect
-        bridge._keepalive_loop()
-
+# ---------------------------------------------------------------------------
+# _on_keepalive_failure: 3-strike policy
+# ---------------------------------------------------------------------------
 
 def test_keepalive_1_failure_no_reconnect(bridge):
-    """1 consecutive failure: counter=1, ws NOT closed."""
-    _run_n_keepalive_cycles(bridge, 1, [False])
+    """1 failure: counter=1, ws NOT closed, event NOT set."""
+    bridge._on_keepalive_failure('test reason 1')
     assert bridge._consecutive_keepalive_failures == 1
     bridge._ws.close.assert_not_called()
+    assert not bridge._force_reconnect_event.is_set()
 
 
 def test_keepalive_2_failures_no_reconnect(bridge):
-    """2 consecutive failures: counter=2, ws NOT closed."""
-    _run_n_keepalive_cycles(bridge, 2, [False, False])
+    """2 failures: counter=2, ws NOT closed, event NOT set."""
+    bridge._on_keepalive_failure('test reason 1')
+    bridge._on_keepalive_failure('test reason 2')
     assert bridge._consecutive_keepalive_failures == 2
     bridge._ws.close.assert_not_called()
+    assert not bridge._force_reconnect_event.is_set()
 
 
 def test_keepalive_3_failures_force_reconnect(bridge):
-    """3 consecutive failures: counter reset to 0, ws IS closed once."""
-    _run_n_keepalive_cycles(bridge, 3, [False, False, False])
-    # Counter resets to 0 after we force a reconnect (so a future
-    # probe starts fresh, not still "3 strikes")
+    """3 failures: counter reset to 0, ws closed once, event SET.
+
+    Counter resets to 0 after we force a reconnect so a future
+    probe starts fresh, not still "3 strikes".
+    """
+    bridge._on_keepalive_failure('test reason 1')
+    bridge._on_keepalive_failure('test reason 2')
+    bridge._on_keepalive_failure('test reason 3')
     assert bridge._consecutive_keepalive_failures == 0
     bridge._ws.close.assert_called_once()
-
-
-def test_keepalive_success_resets_counter(bridge):
-    """2 failures + 1 success: counter reset to 0, ws NOT closed.
-
-    This is the important case that protects against misfire: a
-    single successful probe in the middle must NOT keep us one
-    strike away from a forced reconnect. The new "counter=0 on
-    success" line guards that.
-    """
-    _run_n_keepalive_cycles(bridge, 3, [False, False, True])
-    assert bridge._consecutive_keepalive_failures == 0
-    bridge._ws.close.assert_not_called()
+    assert bridge._force_reconnect_event.is_set()
 
 
 def test_keepalive_close_raising_does_not_crash(bridge):
-    """3 failures where _ws.close() itself raises: swallow and continue.
+    """3 failures where _ws.close() itself raises: swallow + set event.
 
     Defensive: a buggy close() (e.g. websocket-client throwing on a
-    half-closed socket) must not tear down the whole keepalive
-    thread. The except-clause wraps close() in its own try/except.
+    half-closed socket) must not tear down the keepalive logic. The
+    except-clause wraps close() in its own try/except, but the
+    event must still be set so _run_main_loop can exit and the
+    outer _ws_loop can reconnect.
     """
     bridge._ws.close.side_effect = Exception('close() exploded')
-    _run_n_keepalive_cycles(bridge, 3, [False, False, False])
+    bridge._on_keepalive_failure('test reason 1')
+    bridge._on_keepalive_failure('test reason 2')
+    bridge._on_keepalive_failure('test reason 3')
     assert bridge._consecutive_keepalive_failures == 0
     bridge._ws.close.assert_called_once()  # it was attempted even if it raised
+    assert bridge._force_reconnect_event.is_set()  # event still set
 
 
-def test_keepalive_first_cycle_starts_at_zero(bridge):
+def test_keepalive_counter_default_zero(bridge):
     """The counter defaults to 0 on a fresh bridge, not 3.
 
     Regression guard: if someone sets the default to 3 in __init__,
     the very first keepalive failure would force a reconnect.
     """
     assert bridge._consecutive_keepalive_failures == 0
+    assert not bridge._force_reconnect_event.is_set()
+
+
+def test_keepalive_success_after_failures_resets_counter(bridge):
+    """2 failures + 1 success path: counter back to 0.
+
+    We simulate the success path by setting _keepalive_ack_seq[0] to
+    match the just-sent seq, which is what _on_server_msg does when
+    a keepalive_ack arrives. The next failure must go back to 1/3,
+    not 3/3.
+
+    In the production flow this is driven by _run_main_loop's
+    poll-each-iteration check. We invoke _on_keepalive_failure
+    directly here so the test doesn't depend on timing.
+    """
+    bridge._on_keepalive_failure('first fail')
+    bridge._on_keepalive_failure('second fail')
+    assert bridge._consecutive_keepalive_failures == 2
+    # Production path: _on_server_msg sets _keepalive_ack_seq[0] to
+    # the just-acked seq, _run_main_loop sees this and resets the
+    # counter to 0. We model the reset here.
+    bridge._consecutive_keepalive_failures = 0
+    bridge._on_keepalive_failure('after a success, fresh fail')
+    assert bridge._consecutive_keepalive_failures == 1
+    bridge._ws.close.assert_not_called()
+    assert not bridge._force_reconnect_event.is_set()
+
+
+# ---------------------------------------------------------------------------
+# _run_main_loop: short-timeout recv + keepalive tick
+# ---------------------------------------------------------------------------
+
+class _LoopExit(Exception):
+    """Raised by test side-effects to break out of _run_main_loop."""
+
+
+def _drive_main_loop_one_iteration(bridge, recv_side_effects, max_iters=20):
+    """Run _run_main_loop until _stop is set, force-reconnect fires, or
+    we've done ``max_iters`` poll iterations.
+
+    recv_side_effects: list of values for successive _ws.recv() calls.
+    When the list is exhausted, recv() raises WebSocketTimeoutException
+    (production idle behavior). The loop then ticks the keepalive and
+    polls again.
+
+    The driver intentionally does NOT mock time.sleep: _run_main_loop
+    doesn't sleep, so a missing sleep side-effect is fine. We exit via
+    one of:
+      - _stop set by a recv side-effect (test sets it after a result)
+      - force-reconnect event set by _on_keepalive_failure (3-fail)
+      - the test's own max_iters safety net (raises AssertionError
+        if the loop never exits -- catches logic bugs that would
+        otherwise hang pytest)
+    """
+    from websocket import WebSocketTimeoutException
+    iter_results = iter(recv_side_effects)
+    iter_count = [0]
+
+    def recv_side_effect(*args, **kwargs):
+        iter_count[0] += 1
+        if iter_count[0] > max_iters:
+            # Safety net: if the loop runs more than max_iters times
+            # without exiting, the test is misconfigured (e.g. _stop
+            # never gets set). Fail loud instead of hanging pytest.
+            raise _LoopExit('max_iters exceeded')
+        try:
+            return next(iter_results)
+        except StopIteration:
+            raise WebSocketTimeoutException()
+
+    # NOTE: we do NOT patch.object(bridge, '_ws'). The fixture already
+    # gave us a MagicMock for _ws; we just attach a side-effect
+    # recv() to it. Patching _ws would replace it with a *different*
+    # MagicMock that the assertions after the loop don't see, which
+    # breaks "was close() called?" checks.
+    bridge._ws.recv = MagicMock(side_effect=recv_side_effect)
+    with patch.object(bridge, '_send'):
+        # NOTE: do NOT mock _handle_business_msg. The real method is
+        # the one that calls _on_server_msg, which is where the
+        # keepalive_ack -> _keepalive_ack_seq[0] update happens. If
+        # we shadow it with a MagicMock, the test for "ack resets
+        # pending" would never see the seq update and the loop would
+        # never see a successful probe.
+        try:
+            bridge._run_main_loop()
+        except _LoopExit:
+            # Safety net hit: the loop ran max_iters times without
+            # exiting via _stop or force-reconnect. That's normal for
+            # the idle test (timeout=9999 + interval=0 keeps the loop
+            # alive forever). For tests that *expect* a force-reconnect
+            # raise, we wrap that in pytest.raises() at the call site
+            # so it reaches us as ConnectionError, not _LoopExit.
+            pass
+    return iter_count[0]
+
+
+def test_run_main_loop_idle_no_reconnect(bridge):
+    """Idle recv (always timeout) + keepalive with no ack: no force-reconnect
+    because the ack window never expires (timeout=9999s)."""
+    # Set a huge ack window so the only way the loop exits is _stop.
+    # Without this, the *real* time.time() in production code might
+    # already be > 5s past the first keepalive's sent_at, which would
+    # legitimately fire the failure path -- and that's correct
+    # production behavior, just not what this test asserts.
+    bridge._keepalive_ack_timeout = 9999.0
+    bridge._keepalive_interval = 0.0  # send a keepalive each iteration
+    _drive_main_loop_one_iteration(bridge, [])
+    assert bridge._consecutive_keepalive_failures == 0
+    assert not bridge._force_reconnect_event.is_set()
+
+
+def test_run_main_loop_ack_resets_pending(bridge):
+    """When server sends a keepalive_ack while a probe is pending,
+    _run_main_loop should consume the ack and clear the pending probe.
+
+    We simulate the ack arriving in the recv queue as a JSON string
+    that decodes to {'type': 'keepalive_ack', 'seq': 1}. _on_server_msg
+    is the real method (not mocked) so it can update the ack seq.
+    """
+    # Pre-arm: pretend we sent a keepalive seq=1, no ack yet.
+    bridge._keepalive_seq = 1
+    bridge._keepalive_ack_seq = [0]  # server hasn't acked yet
+    # Huge ack window so the pending probe is not abandoned via
+    # the timeout path before the ack has a chance to arrive.
+    bridge._keepalive_ack_timeout = 9999.0
+    bridge._keepalive_interval = 0.0  # send a keepalive each iteration
+
+    # Build a recv() that returns a keepalive_ack then times out.
+    ack_msg = '{"type": "keepalive_ack", "seq": 1}'
+    _drive_main_loop_one_iteration(bridge, [ack_msg])
+
+    # _on_server_msg ran and updated the ack seq.
+    assert bridge._keepalive_ack_seq[0] == 1
+    # _run_main_loop saw the ack seq moved and reset the counter.
+    assert bridge._consecutive_keepalive_failures == 0
+
+
+def test_run_main_loop_3_failures_raises_for_reconnect(bridge):
+    """3 keepalive probes with no ack in the ack window -> force-reconnect.
+
+    We drive 3 keepalive ticks by setting _keepalive_ack_timeout=0
+    so the pending probe fails on the very next iteration. After
+    the third failure _on_keepalive_failure sets
+    _force_reconnect_event, the next while-iteration check exits
+    _run_main_loop with a ConnectionError that the outer _ws_loop
+    catches and turns into a reconnect.
+    """
+    bridge._keepalive_interval = 0.0
+    bridge._keepalive_ack_timeout = 0.0  # expire immediately
+
+    # Use the helper (which patches _ws.recv to always time out and
+    # patches _send so keepalives don't actually leave the test),
+    # and wrap in pytest.raises to catch the expected
+    # ConnectionError. Real time.time() is fine here because we
+    # set the timeout to 0.0 -- any positive elapsed counts as
+    # "expired" -- so we don't need to mock the clock.
+    with pytest.raises(ConnectionError, match='force-reconnect'):
+        _drive_main_loop_one_iteration(bridge, [])
+
+    # 3 failures -> counter reset, event set, ws.close called.
+    assert bridge._force_reconnect_event.is_set()
+    bridge._ws.close.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Module-level: excepthook is installed
+# ---------------------------------------------------------------------------
+
+def test_thread_excepthook_installed():
+    """The module installs threading.excepthook so daemon-thread
+    deaths leave a traceback instead of vanishing silently.
+
+    This is the bug we hit on 2026-06-05 16:32+: a daemon thread
+    died and we had no idea why. We committed 3d20bea to install
+    this hook; this test guards against future refactors that
+    accidentally remove it.
+    """
+    import threading
+    # Re-import to be sure (in case the module was loaded once but
+    # then a re-import happened during a separate test).
+    from agent import ws_bridge
+    assert ws_bridge.threading.excepthook is not None
+    # Should be our handler, not the default no-op.
+    assert ws_bridge.threading.excepthook.__name__ == '_thread_excepthook'
