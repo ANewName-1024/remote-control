@@ -27,6 +27,24 @@ from . import protocol as ipc
 
 log = logging.getLogger('ws-bridge')
 
+
+# Daemon threads silently die on uncaught exceptions. We use a
+# module-level excepthook so any future regression in _ws_loop /
+# _keepalive_loop / _frame_pump / _heartbeat shows up in the log
+# with a full traceback instead of vanishing.
+def _thread_excepthook(args):
+    try:
+        log.error(
+            f'Daemon thread {args.thread.name!r} died with unhandled '
+            f'exception ({type(args.exc_type).__name__}: {args.exc_value}); '
+            f'WS bridge will likely be stuck until service restart',
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+    except Exception:
+        # excepthook must never raise
+        pass
+threading.excepthook = _thread_excepthook
+
 # Try websocket-client (preferred). Fall back to a minimal pure-stdlib
 # implementation if unavailable.
 try:
@@ -101,6 +119,16 @@ class WSBridge:
         # a close so the outer _ws_loop reconnects. Reset to 0 on
         # any successful probe.
         self._consecutive_keepalive_failures: int = 0
+        # Cross-thread reconnect signal: _keepalive_loop sets this
+        # on a hard failure, _connect()'s inner recv-loop polls it
+        # every iteration so we can break out *without* depending on
+        # ``self._ws.close()`` to interrupt a 3600s blocking recv().
+        # ``close()`` is unreliable for waking a recv() in
+        # websocket-client on Windows (it just sets a flag, the
+        # socket isn't actually torn down until recv()'s own timeout
+        # fires). The event is the canonical signal; the settimeout
+        # + close in _keepalive_loop is just a hint to speed it up.
+        self._force_reconnect_event: threading.Event = threading.Event()
         # Stats
         self.frames_sent = 0
         self.cmds_recv = 0
@@ -195,7 +223,12 @@ class WSBridge:
         # We swallow WebSocketTimeoutException (idle timeout) and keep waiting,
         # so an idle user doesn't cause a reconnect storm. Anything else
         # (socket closed, protocol error) still bubbles up to reconnect.
-        while not self._stop.is_set():
+        #
+        # We also poll ``_force_reconnect_event`` on every iteration: when
+        # _keepalive_loop flags the WS as half-dead, we want to break out of
+        # this loop *promptly* and let the outer _ws_loop reconnect, instead
+        # of waiting up to 3600s for recv()'s own timeout to fire.
+        while not self._stop.is_set() and not self._force_reconnect_event.is_set():
             try:
                 raw = self._ws.recv()
                 if not raw:
@@ -219,6 +252,12 @@ class WSBridge:
             except Exception as e:
                 log.warning(f'WS recv error: {e}')
                 raise
+        # Loop exit: only happens if _stop or _force_reconnect_event fired.
+        # If we were asked to force-reconnect, surface a clear reason so
+        # the outer _ws_loop can log it on the next iteration.
+        if self._force_reconnect_event.is_set():
+            self._force_reconnect_event.clear()
+            raise ConnectionError('force-reconnect requested by keepalive (WS half-dead)')
 
     def _keepalive_loop(self) -> None:
         """Send a small business keepalive every 25s.
@@ -326,8 +365,22 @@ class WSBridge:
                     )
                     self._consecutive_keepalive_failures = 0
                     self._keepalive_ack.clear()
+                    # Step 1: set the cross-thread signal first. This is
+                    # the *guaranteed* way to wake _connect()'s recv()
+                    # loop: it polls the event every iteration.
+                    self._force_reconnect_event.set()
+                    # Step 2: best-effort close + short timeout so any
+                    # recv() call that is *already* blocked wakes up
+                    # quickly. On Windows, websocket-client's close()
+                    # doesn't always interrupt a 3600s blocking recv
+                    # immediately, so the event-based wake is the
+                    # real fix; this is just a latency optimization.
                     try:
                         if self._ws is not None:
+                            try:
+                                self._ws.settimeout(0.1)
+                            except Exception:
+                                pass
                             self._ws.close()
                     except Exception as close_err:
                         # Best effort: if close() itself raises, we
