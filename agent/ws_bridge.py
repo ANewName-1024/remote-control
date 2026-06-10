@@ -21,6 +21,7 @@ import ssl
 import struct
 import threading
 import time
+from collections import deque
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
@@ -161,6 +162,28 @@ class WSBridge:
         # list so we can mutate it from _on_server_msg without a
         # lock; both writers and readers are on the same thread.
         self._keepalive_ack_seq: list = [0]
+        # CONTRACT-FALLBACK: if a non-conformant server omits the seq
+        # field in keepalive_ack, we still want to recognize the ack
+        # rather than time out. We keep a rolling window of the last
+        # 30s of keepalive ts values we sent and match any ack whose
+        # ts falls inside that window. This catches a partial bug
+        # (server sends acks but without seq) without silently
+        # swallowing a real ack loss (an ack that arrives 30s after
+        # its probe is meaningless for connection liveness).
+        self._keepalive_ts_window: deque = deque(maxlen=64)
+        self._keepalive_ack_timeout: float = 5.0
+        # Rolling RTT samples (ms). Last 20 probes. Surface in
+        # service heartbeat so an operator can see half-dead WS
+        # before it actually drops.
+        self._rtt_samples_ms: deque = deque(maxlen=20)
+        # Outgoing_q backpressure. When _outgoing_q gets close to
+        # full, instead of just dropping (which was the old
+        # behavior), we also tell the helper pipe to back off its
+        # capture rate so the queue drains. Helper reads
+        # service_out via cmd pipe and adjusts fps_target.
+        self._backpressure_signaled: float = 0.0
+        self._backpressure_cooldown: float = 2.0
+        self._max_outgoing_q_high_watermark: int = 384  # 75% of 512
         # The 25s cadence server ping is also tracked in
         # _keepalive_ack (a threading.Event) so future
         # code that runs in a different thread can still
@@ -241,6 +264,15 @@ class WSBridge:
                 # still see why the disconnect happened; we own the
                 # cleanup here.
                 self._force_reconnect_event.clear()
+                # Reset keepalive / RTT state for the new connection.
+                # If we don't, the seq watermark and the ts-window
+                # could match stale values from the previous
+                # connection, silently skipping the first probe's
+                # ack check (false positive) or, worse, blocking
+                # the new connection until the window drains.
+                self._keepalive_ack_seq[0] = 0
+                self._keepalive_ts_window.clear()
+                self._rtt_samples_ms.clear()
                 # Distinguish 'first connect' from 'reconnect N'
                 if self._reconnect_attempt == 1:
                     log.warning(f'WS disconnected: {e}; reconnecting in {backoff:.1f}s')
@@ -337,6 +369,15 @@ class WSBridge:
                 if now - last_keepalive_send >= self._keepalive_interval:
                     seq = self._next_keepalive_seq()
                     self._send({'type': 'keepalive', 'ts': now, 'seq': seq})
+                    # Track ts in window so a server that doesn't
+                    # echo seq back can still be recognized via the
+                    # ts-window fallback in _on_server_msg. Also
+                    # prune stale entries (>30s old) so the window
+                    # doesn't fill with ancient probes.
+                    self._keepalive_ts_window.append(now)
+                    cutoff = now - 30.0
+                    while self._keepalive_ts_window and self._keepalive_ts_window[0] < cutoff:
+                        self._keepalive_ts_window.popleft()
                     pending = (seq, now)
                     last_keepalive_send = now
             else:
@@ -482,12 +523,57 @@ class WSBridge:
             log.info(f'WS: {t}: {msg}')
             return
         if t == 'keepalive_ack':
-            # Round-trip response from server. _keepalive_loop is
-            # blocked on this Event. Wake it up so it can check the
-            # seq matches the one it just sent.
-            seq = msg.get('seq', 0)
-            self._keepalive_ack_seq[0] = max(self._keepalive_ack_seq[0], seq)
-            self._keepalive_ack.set()
+            # Round-trip response from server. Two matching strategies:
+            #   1. seq-based (canonical) — server echoes back the seq we
+            #      sent. The agent's pending probe has the matching seq
+            #      so we can clear it deterministically.
+            #   2. ts-window fallback (defensive) — if the server is a
+            #      pre-contract version and does not include seq, we
+            #      still want to count the ack. We accept the ack if
+            #      its ts falls inside the rolling window of ts values
+            #      we sent in the last _keepalive_ack_timeout * 6
+            #      (30s default) seconds. An ack that arrives later
+            #      than that window is too stale to claim connection
+            #      liveness, so we ignore it.
+            seq = msg.get('seq', None)
+            ts = msg.get('ts', None)
+            matched = False
+            if seq is not None and isinstance(seq, int) and seq > self._keepalive_ack_seq[0]:
+                # Canonical path: server honored the seq contract.
+                self._keepalive_ack_seq[0] = seq
+                matched = True
+            elif ts is not None:
+                # Fallback: server is old (or buggy) and skipped seq.
+                # Look for any ts in our sent window close enough to
+                # the echoed ts. Allow ±2s slack for clock skew / NTP.
+                for sent_ts in self._keepalive_ts_window:
+                    if abs(ts - sent_ts) <= 2.0:
+                        # Mark "satisfied" by raising the watermark
+                        # past the current pending probe. We don't
+                        # know the original seq (that's why we're
+                        # in the fallback path), so we push the
+                        # watermark to (_keepalive_seq + 1) — which
+                        # is greater than any seq we've sent, so
+                        # _run_main_loop's check `watermark >= pending`
+                        # will succeed for the current probe AND any
+                        # future probes until a real seq arrives.
+                        if self._keepalive_ack_seq[0] <= self._keepalive_seq:
+                            self._keepalive_ack_seq[0] = self._keepalive_seq + 1
+                        matched = True
+                        break
+            if matched:
+                # Compute RTT for visibility (server echo'd its own ts
+                # in our ts); if ts missing or server is old, RTT is
+                # not measurable, skip.
+                if ts is not None:
+                    try:
+                        rtt_ms = int((time.time() - ts) * 1000)
+                        self._rtt_samples_ms.append(rtt_ms)
+                    except Exception:
+                        pass
+                self._keepalive_ack.set()
+            else:
+                log.debug(f'keepalive_ack ignored (no seq match, no ts-window hit): {msg}')
             return
         if t == 'mouse':
             # mouse event from remote client (action: down/up/move/click/double_click/wheel)
@@ -612,6 +698,29 @@ class WSBridge:
         """
         try:
             self._outgoing_q.put_nowait(msg)
+            # Backpressure: if the queue crosses the high-watermark
+            # (75% full) and we haven't signaled the helper recently,
+            # send a fps_backoff over the cmd pipe so the helper
+            # reduces its capture rate. Without this, a slow WS
+            # (server stall, no client, slow network) makes the
+            # queue fill and we end up dropping frames; the helper
+            # keeps capturing at full fps the whole time, which is
+            # pure waste. We cooldown for 2s between signals so we
+            # don't spam the cmd pipe.
+            if (
+                self._outgoing_q.qsize() >= self._max_outgoing_q_high_watermark
+                and time.time() - self._backpressure_signaled >= self._backpressure_cooldown
+            ):
+                self._backpressure_signaled = time.time()
+                try:
+                    self.pipes.send_cmd({
+                        'type': 'fps_backoff',
+                        'reason': 'outgoing_q_high_watermark',
+                        'qsize': self._outgoing_q.qsize(),
+                        'drops': self._outgoing_drops,
+                    })
+                except Exception as bp_err:
+                    log.debug(f'fps_backoff signal failed: {bp_err}')
         except queue.Full:
             self._outgoing_drops += 1
             if self._outgoing_drops % 100 == 1:

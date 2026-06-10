@@ -561,10 +561,30 @@ def run(config_dir: str = None):
                 if bridge:
                     msg_stats = bridge.get_and_reset_msg_stats()
                     msg_str = ' '.join(f'{k}={v}' for k, v in sorted(msg_stats.items())) or 'none'
+                    # RTT stats from the keepalive_ack loop. Average and
+                    # max of the last 20 samples. Surface here so an
+                    # operator can see connection drift before it
+                    # manifests as a full WS half-close. Empty when no
+                    # keepalive has round-tripped yet.
+                    rtt_samples = list(getattr(bridge, '_rtt_samples_ms', []))
+                    if rtt_samples:
+                        rtt_avg = sum(rtt_samples) // len(rtt_samples)
+                        rtt_max = max(rtt_samples)
+                        rtt_str = f'rtt_avg={rtt_avg}ms rtt_max={rtt_max}ms'
+                    else:
+                        rtt_str = 'rtt=unknown'
+                    # backpressure + drops so the operator can correlate
+                    # frame_pump stalls with WS health.
+                    bp_str = (
+                        f' q_drops={bridge._outgoing_drops}'
+                        f' q_size={bridge._outgoing_q.qsize()}/512'
+                        f' ka_fail={bridge._consecutive_keepalive_failures}/3'
+                    )
                     bridge_stats = (
                         f' frames_sent={bridge.frames_sent} bytes_sent={bridge.bytes_sent}'
                         f' ws={bridge.ws_state} cmds_sent={bridge.cmds_sent} cmds_recv={bridge.cmds_recv}'
                         f' auth={"yes" if bridge.auth_ok else "no"}'
+                        f' {rtt_str}{bp_str}'
                         f' last30s=[{msg_str}]'
                     )
                 else:

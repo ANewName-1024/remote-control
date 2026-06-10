@@ -38,6 +38,13 @@ MSG_INPUT_CLIPBOARD_SET = 'input_clipboard_set'  # {text: "..."}
 MSG_INPUT_EXEC       = 'input_exec'        # {cmd, session_id} (shell exec in helper)
 MSG_INPUT_FILE_DOWNLOAD = 'input_file_download'  # {path, filename, session_id}
 MSG_INPUT_FILE_UPLOAD   = 'input_file_upload'    # {filename, target_path, chunk, is_last, session_id}
+MSG_FPS_BACKOFF      = 'fps_backoff'       # {reason, qsize, drops}
+                                          # Service -> helper: outgoing_q is
+                                          # above high-watermark; please drop
+                                          # capture fps by ~50% for 2s. The
+                                          # helper is expected to halve its
+                                          # capture loop sleep until it sees
+                                          # a clear signal (no backoff for 5s).
 
 # Helper -> service
 MSG_CAPTURE_BATCH    = 'capture_batch'     # {frames: [{seq, ts, w, h, fmt, delta}, ...]}

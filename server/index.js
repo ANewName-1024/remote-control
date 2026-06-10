@@ -211,13 +211,28 @@ app.get('/api/agents', (req, res) => {
     if (password !== ACCESS_PASSWORD) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
-    const agents = Array.from(AGENTS.values()).map(a => ({
-        agentId: a.info.agentId,
-        hostname: a.info.hostname,
-        os: a.info.os,
-        lastSeen: a.lastSeen,
-        online: a.ws && a.ws.readyState === 1
-    }));
+    const agents = Array.from(AGENTS.values()).map(a => {
+        // RTT summary: average and max from the rolling window
+        // maintained by the keepalive handler. Useful for
+        // operators to spot connection drift before it becomes a
+        // full half-close. rttSamples is small (<=20 entries) so
+        // we compute it inline.
+        const rtts = a.rttSamples || [];
+        const rttAvg = rtts.length ? Math.round(rtts.reduce((s, v) => s + v, 0) / rtts.length) : null;
+        const rttMax = rtts.length ? Math.max(...rtts) : null;
+        return {
+            agentId: a.info.agentId,
+            hostname: a.info.hostname,
+            os: a.info.os,
+            lastSeen: a.lastSeen,
+            lastKeepaliveAt: a.lastKeepaliveAt || null,
+            lastRttMs: a.lastRttMs || null,
+            rttAvgMs: rttAvg,
+            rttMaxMs: rttMax,
+            rttSamples: rtts.length,
+            online: a.ws && a.ws.readyState === 1
+        };
+    });
     res.json({ agents });
 });
 
@@ -678,10 +693,37 @@ wss.on('connection', (ws, req) => {
                     const agent = AGENTS.get(agentId);
                     if (agent) {
                         agent.lastSeen = Date.now();
+                        // RTT bookkeeping: agent sends ts in *seconds*
+                        // (time.time() on the Python side), so we have
+                        // to compare against Date.now()/1000 (also
+                        // seconds) and then convert to ms for the API.
+                        // Mixing units was a real bug caught by
+                        // test_ws_protocol.js [10] on 2026-06-10: the
+                        // raw diff Date.now() - msg.ts gave 1.78e12,
+                        // which would have made /api/agents nonsense.
+                        if (typeof msg.ts === 'number') {
+                            const rtt = Math.round((Date.now() / 1000 - msg.ts) * 1000);
+                            agent.lastRttMs = rtt;
+                            agent.rttSamples = (agent.rttSamples || []);
+                            agent.rttSamples.push(rtt);
+                            if (agent.rttSamples.length > 20) agent.rttSamples.shift();
+                        }
+                        agent.lastKeepaliveAt = Date.now();
                         try {
                             if (agent.ws.readyState === 1) {
-                                agent.ws.send(JSON.stringify({ type: 'keepalive_ack', ts: msg.ts }));
-                                console.log(`[keepalive] from ${agentId} seq=${msg.seq} ack_sent`);
+                                // CONTRACT: keepalive_ack MUST echo seq back to
+                                // the agent. Older server versions only sent
+                                // ts, which caused the agent's seq-based probe
+                                // matcher to always read 0 and force-reconnect
+                                // every 5s. The agent still falls back to a
+                                // ts-window match for safety, but this field is
+                                // the canonical signal.
+                                agent.ws.send(JSON.stringify({
+                                    type: 'keepalive_ack',
+                                    seq: msg.seq,
+                                    ts: msg.ts,
+                                }));
+                                console.log(`[keepalive] from ${agentId} seq=${msg.seq} rtt=${agent.lastRttMs || '?'}ms ack_sent`);
                             }
                         } catch (e) {}
                     }
