@@ -166,7 +166,18 @@ app.get('/api/status', (req, res) => {
         agents: AGENTS.size,
         clients: CLIENTS.size,
         version: '1.0.0',
-        hasPassword: !!ACCESS_PASSWORD
+        hasPassword: !!ACCESS_PASSWORD,
+        // Diag-only: server's wall clock (Date.now). Used to detect
+        // clock skew between server and agent. The agent can call
+        // this and compare to its own time.time()*1000 to measure
+        // skew. (Real "network RTT" excludes the skew term, but
+        // Date.now()-msg.ts on the keepalive handler measures
+        // skew + 1-way RTT together, which is what the existing
+        // /api/agents.lastRttMs reports. We do not fix the skew
+        // in code — NTP is the proper fix — but we expose the
+        // raw clocks so the skew is observable.)
+        serverNowMs: Date.now(),
+        nodeVersion: process.version,
     });
 });
 
@@ -212,24 +223,60 @@ app.get('/api/agents', (req, res) => {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     const agents = Array.from(AGENTS.values()).map(a => {
-        // RTT summary: average and max from the rolling window
-        // maintained by the keepalive handler. Useful for
-        // operators to spot connection drift before it becomes a
-        // full half-close. rttSamples is small (<=20 entries) so
-        // we compute it inline.
+        // Three metric families, all from the keepalive handler's
+        // rolling windows (<=20 samples each):
+        //
+        //   rttSamples / rttAvgMs / rttMaxMs  (oneWayRttMs):
+        //     Date.now() - msg.ts*1000, i.e. clock skew + one-way
+        //     RTT. A large value here (e.g. 600ms when ICMP ping
+        //     is 16ms) is the NTP drift signal — see
+        //     lastClockSkewMs to disambiguate.
+        //
+        //   skewSamples / skewAvgMs / skewMaxMs  (clockSkewMs):
+        //     Same number rounded separately so the dashboard
+        //     can color the skew term red on its own.
+        //
+        //   procSamples / procAvgMs / procMaxMs  (serverProcMs):
+        //     process.hrtime.bigint() delta between
+        //     keepalive-received and ack-sent. Monotonic, not
+        //     subject to wall clock drift. Should be <5ms on a
+        //     healthy node. If this creeps up the node is the
+        //     bottleneck, not the network.
+        //
+        // The legacy oneWayRttMs field is kept under
+        // `lastRttMs` / `rttAvgMs` / `rttMaxMs` for backward
+        // compat — operators who already know the units of
+        // `rttAvgMs` see the same number they used to.
         const rtts = a.rttSamples || [];
         const rttAvg = rtts.length ? Math.round(rtts.reduce((s, v) => s + v, 0) / rtts.length) : null;
         const rttMax = rtts.length ? Math.max(...rtts) : null;
+        const skews = a.skewSamples || [];
+        const skewAvg = skews.length ? Math.round(skews.reduce((s, v) => s + v, 0) / skews.length) : null;
+        const skewMax = skews.length ? Math.max(...skews) : null;
+        const procs = a.procSamples || [];
+        const procAvg = procs.length ? Math.round((procs.reduce((s, v) => s + v, 0) / procs.length) * 1000) / 1000 : null;
+        const procMax = procs.length ? Math.max(...procs) : null;
         return {
             agentId: a.info.agentId,
             hostname: a.info.hostname,
             os: a.info.os,
             lastSeen: a.lastSeen,
             lastKeepaliveAt: a.lastKeepaliveAt || null,
+            // Legacy / one-way RTT (includes clock skew)
             lastRttMs: a.lastRttMs || null,
             rttAvgMs: rttAvg,
             rttMaxMs: rttMax,
             rttSamples: rtts.length,
+            // New: clock skew term (wall clock diff, monotonic-free)
+            lastClockSkewMs: a.lastClockSkewMs || null,
+            skewAvgMs: skewAvg,
+            skewMaxMs: skewMax,
+            skewSamples: skews.length,
+            // New: server processing time (monotonic, ms, 3dp)
+            lastServerProcMs: a.lastServerProcMs || null,
+            procAvgMs: procAvg,
+            procMaxMs: procMax,
+            procSamples: procs.length,
             online: a.ws && a.ws.readyState === 1
         };
     });
@@ -693,22 +740,58 @@ wss.on('connection', (ws, req) => {
                     const agent = AGENTS.get(agentId);
                     if (agent) {
                         agent.lastSeen = Date.now();
-                        // RTT bookkeeping: agent sends ts in *seconds*
-                        // (time.time() on the Python side), so we have
-                        // to compare against Date.now()/1000 (also
-                        // seconds) and then convert to ms for the API.
-                        // Mixing units was a real bug caught by
-                        // test_ws_protocol.js [10] on 2026-06-10: the
-                        // raw diff Date.now() - msg.ts gave 1.78e12,
-                        // which would have made /api/agents nonsense.
+                        // Clock + RTT bookkeeping. Three numbers:
+                        //
+                        //   * serverProcMs  — how long server spent
+                        //     parsing the keepalive, computing the
+                        //     RTT/skew, and pushing the ack into the
+                        //     WS outgoing queue. Measured with
+                        //     process.hrtime.bigint() (monotonic) so
+                        //     it is wall-clock-skew free.
+                        //     Expected ~0.1-1ms on a healthy node.
+                        //
+                        //   * clockSkewMs   — Date.now() - msg.ts*1000.
+                        //     This is the diff between server's wall
+                        //     clock and the agent's wall clock at the
+                        //     moment server received the keepalive, MINUS
+                        //     one-way network RTT. With a 16ms ICMP
+                        //     ping and a 600ms skew, this reads ~616ms
+                        //     (skew dominates, network RTT is small).
+                        //     Catching a >100ms skew here is the
+                        //     signal that VPS NTP is broken or that
+                        //     something is wrong with one of the
+                        //     clocks. The fix is `apt install chrony`
+                        //     (or whatever the VPS distro uses), not
+                        //     anything in this codebase.
+                        //
+                        //   * oneWayRttMs   — the legacy single
+                        //     number, kept for backward compat with
+                        //     any caller reading /api/agents.lastRttMs.
+                        //     = clockSkewMs + (real one-way RTT).
+                        //     The agent side computes the *real*
+                        //     round-trip RTT in its own clock
+                        //     (typically 22-50ms for this deployment,
+                        //     see ws_bridge._rtt_samples_ms) so the
+                        //     discrepancy between server's oneWayRttMs
+                        //     and agent's rtt_avg is the skew signal.
+                        //
+                        // All three are pushed into their own rolling
+                        // window of <=20 samples for /api/agents.
+                        const recvMonoNs = process.hrtime.bigint();
+                        const recvAtMs = Date.now();
                         if (typeof msg.ts === 'number') {
-                            const rtt = Math.round((Date.now() / 1000 - msg.ts) * 1000);
-                            agent.lastRttMs = rtt;
+                            const oneWayRtt = Math.round((recvAtMs / 1000 - msg.ts) * 1000);
+                            const clockSkew = Math.round(recvAtMs - msg.ts * 1000);
+                            agent.lastRttMs = oneWayRtt;          // legacy name
+                            agent.lastClockSkewMs = clockSkew;    // new: wall-clock skew term
                             agent.rttSamples = (agent.rttSamples || []);
-                            agent.rttSamples.push(rtt);
+                            agent.rttSamples.push(oneWayRtt);
                             if (agent.rttSamples.length > 20) agent.rttSamples.shift();
+                            agent.skewSamples = (agent.skewSamples || []);
+                            agent.skewSamples.push(clockSkew);
+                            if (agent.skewSamples.length > 20) agent.skewSamples.shift();
                         }
-                        agent.lastKeepaliveAt = Date.now();
+                        agent.lastKeepaliveAt = recvAtMs;
                         try {
                             if (agent.ws.readyState === 1) {
                                 // CONTRACT: keepalive_ack MUST echo seq back to
@@ -717,13 +800,30 @@ wss.on('connection', (ws, req) => {
                                 // matcher to always read 0 and force-reconnect
                                 // every 5s. The agent still falls back to a
                                 // ts-window match for safety, but this field is
-                                // the canonical signal.
-                                agent.ws.send(JSON.stringify({
+                                // the canonical signal. We additionally
+                                // echo `serverRecvAtMs` so the agent can
+                                // observe the server's wall clock and
+                                // compute clock skew on its side (a
+                                // simple `serverRecvAtMs - msg.ts*1000`
+                                // gives the same number as
+                                // lastClockSkewMs above, exposed two
+                                // ways for cross-checking).
+                                const ack = JSON.stringify({
                                     type: 'keepalive_ack',
                                     seq: msg.seq,
                                     ts: msg.ts,
-                                }));
-                                console.log(`[keepalive] from ${agentId} seq=${msg.seq} rtt=${agent.lastRttMs || '?'}ms ack_sent`);
+                                    serverRecvAtMs: recvAtMs,
+                                });
+                                agent.ws.send(ack);
+                                // Measure server processing time
+                                // between recv and ack-pushed-to-ws.
+                                const sendMonoNs = process.hrtime.bigint();
+                                const procMs = Number(sendMonoNs - recvMonoNs) / 1e6;
+                                agent.lastServerProcMs = Math.round(procMs * 1000) / 1000; // 3 dp
+                                agent.procSamples = (agent.procSamples || []);
+                                agent.procSamples.push(agent.lastServerProcMs);
+                                if (agent.procSamples.length > 20) agent.procSamples.shift();
+                                console.log(`[keepalive] from ${agentId} seq=${msg.seq} clockSkew=${agent.lastClockSkewMs}ms oneWayRtt=${agent.lastRttMs}ms proc=${agent.lastServerProcMs}ms ack_sent`);
                             }
                         } catch (e) {}
                     }

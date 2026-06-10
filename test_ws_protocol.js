@@ -270,6 +270,22 @@ function waitForClose(ws, timeoutMs = 2000) {
             check('Server tracks rtt for keepalive agent',
                   kaAgent && typeof kaAgent.lastRttMs === 'number' && kaAgent.lastRttMs < 1000,
                   JSON.stringify(kaAgent));
+            // 2026-06-10: /api/agents now exposes a 3-way split
+            // (clockSkew, oneWayRtt, serverProc) so the operator
+            // can tell apart "my VPS clock is wrong" from
+            // "my real network RTT is bad" from "my Node event
+            // loop is choking". All three should be present.
+            if (kaAgent) {
+                check('lastClockSkewMs present (wall-clock skew term)',
+                      typeof kaAgent.lastClockSkewMs === 'number',
+                      `lastClockSkewMs=${kaAgent.lastClockSkewMs}`);
+                check('lastServerProcMs present (monotonic, sub-ms)',
+                      typeof kaAgent.lastServerProcMs === 'number' && kaAgent.lastServerProcMs < 50,
+                      `lastServerProcMs=${kaAgent.lastServerProcMs}`);
+                check('skewSamples/procSamples accumulate',
+                      (kaAgent.skewSamples || 0) >= 3 && (kaAgent.procSamples || 0) >= 3,
+                      `skewSamples=${kaAgent.skewSamples} procSamples=${kaAgent.procSamples}`);
+            }
         }
         kaWs.close();
         await waitForClose(kaWs);
